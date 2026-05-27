@@ -1,0 +1,28 @@
+{
+  "mcpServers": {
+    "wifi-cam": {
+      "command": "uv",
+      "args": ["--directory", "/home/YOUR_USERNAME/repo/embodied-agy/wifi-cam-mcp", "run", "wifi-cam-mcp"],
+      "env": {
+        "TAPO_CAMERA_HOST": "192.168.1.XXX",
+        "TAPO_USERNAME": "your-tapo-username",
+        "TAPO_PASSWORD": "your-tapo-password"
+      }
+    },
+    "memory": {
+      "command": "uv",
+      "args": ["--directory", "/home/YOUR_USERNAME/repo/embodied-agy/memory-mcp", "run", "memory-mcp"]
+    },
+    "sociality": {
+      "command": "uv",
+      "args": ["--directory", "/home/YOUR_USERNAME/repo/embodied-agy/sociality-mcp", "run", "sociality-mcp"],
+      "env": {
+        "SOCIAL_POLICY_PATH": "/home/YOUR_USERNAME/repo/embodied-agy/socialPolicy.toml"
+      }
+    },
+    "system-temperature": {
+      "command": "uv",
+      "args": ["--directory", "/home/YOUR_USERNAME/repo/embodied-agy/system-temperature-mcp", "run", "system-temperature-mcp"]
+    }
+  }
+}
