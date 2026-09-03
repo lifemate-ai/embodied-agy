@@ -7,68 +7,99 @@ on:
     branches: [main]
 
 jobs:
-  test-memory-mcp:
-    name: Test memory-mcp
+  workspace:
+    name: Full workspace (Ubuntu)
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: memory-mcp
     steps:
       - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
 
       - uses: astral-sh/setup-uv@v5
         with:
           version: "latest"
+          enable-cache: true
 
-      - name: Install dependencies
-        run: uv sync --extra dev
+      - name: Install workspace
+        run: uv sync --locked --all-extras --group dev
+
+      - name: Verify lockfile
+        run: uv lock --check
 
       - name: Lint
         run: uv run ruff check .
 
-      - name: Type check
-        run: uv run mypy src/memory_mcp/ --ignore-missing-imports
+      - name: Type check memory-mcp
+        run: uv run mypy memory-mcp/src/memory_mcp/ --ignore-missing-imports
 
-      - name: Run tests
-        run: uv run pytest -v
+      - name: Run workspace tests
+        run: |
+          uv run pytest tests -q
+          uv run --project "$GITHUB_WORKSPACE" --directory memory-mcp pytest -q
+          uv run --project "$GITHUB_WORKSPACE" --directory tts-mcp pytest -q
+          uv run --project "$GITHUB_WORKSPACE" --directory wifi-cam-mcp pytest -q
+          uv run --project "$GITHUB_WORKSPACE" --directory desire-system pytest -q
+          uv run --project "$GITHUB_WORKSPACE" --directory system-temperature-mcp pytest -q
+          uv run --project "$GITHUB_WORKSPACE" --directory x-mcp pytest -q
+          uv run --project "$GITHUB_WORKSPACE" --directory consciousness-mcp/packages/kernel-mcp pytest -q
+          uv run --project "$GITHUB_WORKSPACE" --directory sociality-mcp pytest -q
+          uv run --project "$GITHUB_WORKSPACE" --directory sociality-mcp/packages/agent-grammar pytest -q
+          uv run --project "$GITHUB_WORKSPACE" --directory sociality-mcp/packages/boundary-mcp pytest -q
+          uv run --project "$GITHUB_WORKSPACE" --directory sociality-mcp/packages/interaction-orchestrator-mcp pytest -q
+          uv run --project "$GITHUB_WORKSPACE" --directory sociality-mcp/packages/joint-attention-mcp pytest -q
+          uv run --project "$GITHUB_WORKSPACE" --directory sociality-mcp/packages/relationship-mcp pytest -q
+          uv run --project "$GITHUB_WORKSPACE" --directory sociality-mcp/packages/self-narrative-mcp pytest -q
+          uv run --project "$GITHUB_WORKSPACE" --directory sociality-mcp/packages/social-core pytest -q
+          uv run --project "$GITHUB_WORKSPACE" --directory sociality-mcp/packages/social-state-mcp pytest -q
 
-  test-tts-mcp:
-    name: Test tts-mcp
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: tts-mcp
+  core-platforms:
+    name: Core runtime (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
 
       - uses: astral-sh/setup-uv@v5
         with:
           version: "latest"
+          enable-cache: true
 
-      - name: Install dependencies
-        run: uv sync --extra dev
+      - name: Run guided Core setup (macOS)
+        if: runner.os == 'macOS'
+        run: ./scripts/setup.sh --profile core --non-interactive --skip-model-download --force
 
-      - name: Lint
-        run: uv run ruff check .
+      - name: Run guided Core setup (Windows)
+        if: runner.os == 'Windows'
+        run: scripts\setup.cmd --profile core --non-interactive --skip-model-download --force
 
-      - name: Run tests
-        run: uv run pytest -v
+      - name: Install test dependencies
+        run: uv sync --locked --group dev
 
-  test-wifi-cam-mcp:
-    name: Test wifi-cam-mcp
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: wifi-cam-mcp
-    steps:
-      - uses: actions/checkout@v4
+      - name: Verify platform, hook, and memory startup contracts
+        run: >-
+          uv run pytest
+          tests/test_uv_workspace.py
+          tests/test_platform_launchers.py
+          tests/test_doctor_cli.py
+          tests/test_mcp_probe.py
+          consciousness-mcp/packages/kernel-mcp/tests/test_hook_cli.py
+          consciousness-mcp/packages/kernel-mcp/tests/test_agy_hook_cli.py
+          memory-mcp/tests/test_embedding_warmup.py
+          -q
 
-      - uses: astral-sh/setup-uv@v5
-        with:
-          version: "latest"
+      - name: Run live Core doctor (macOS)
+        if: runner.os == 'macOS'
+        run: ./scripts/doctor.sh --live --json
 
-      - name: Install dependencies
-        run: uv sync --extra dev
-
-      - name: Lint
-        run: uv run ruff check .
+      - name: Run live Core doctor (Windows)
+        if: runner.os == 'Windows'
+        run: scripts\doctor.cmd --live --json

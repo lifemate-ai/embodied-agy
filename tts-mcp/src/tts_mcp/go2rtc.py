@@ -27,7 +27,7 @@ PLATFORM_MAP = {
 
 
 def default_cache_dir() -> Path:
-    return Path.home() / ".cache" / "embodied.gemini" / "go2rtc"
+    return Path.home() / ".cache" / "embodied-agy" / "go2rtc"
 
 
 def default_bin_path() -> Path:

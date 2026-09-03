@@ -1,6 +1,5 @@
 # Python
 __pycache__/
-mcp_config.json
 *.py[cod]
 *$py.class
 *.so
@@ -40,8 +39,12 @@ ENV/
 .env.local
 .env.*.local
 
-# MCP config (may contain API keys)
-.mcp.json
+# Project MCP config written by scripts/setup.sh (may contain API keys).
+# The rest of .agents/ (hooks.json, hooks.example.json, mcp_config.json.example,
+# hooks/, skills/) is committed. Workspace trust is per machine but lives in
+# ~/.gemini/antigravity-cli/settings.json, outside the repository.
+.agents/mcp_config.json
+.agents/mcp_config.json.backup-*
 
 # Captured images
 /captures/
@@ -91,4 +94,3 @@ references/
 
 # Per-person seeds for relationship-mcp (contain private facts)
 .local/
-

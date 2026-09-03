@@ -1,0 +1,378 @@
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+from io import StringIO
+from pathlib import Path
+
+from scripts import onboarding, setup
+from scripts.doctor import CheckResult, CheckStatus
+from scripts.onboarding import (
+    CORE_SERVER_NAMES,
+    SERVER_SPECS,
+    TAPO_REQUIRED_ENVIRONMENT,
+    FeatureSelection,
+)
+from scripts.setup import execute_setup
+
+ROOT = Path(__file__).parents[1]
+SETUP = ROOT / "scripts" / "setup.py"
+WORKSPACE_CONFIG = ROOT / ".agents" / "mcp_config.json"
+
+
+def _file_state(path: Path) -> tuple[bool, int | None, int | None]:
+    """Existence, size and mtime: enough to show a dry run wrote nothing.
+
+    The checkout may already hold a real config from an earlier setup, so
+    "does not exist" is not something a test can assume; "unchanged" is.
+    """
+    if not path.exists():
+        return (False, None, None)
+    stat = path.stat()
+    return (True, stat.st_size, stat.st_mtime_ns)
+
+
+def test_core_sync_command_has_no_optional_extras() -> None:
+    assert setup.build_sync_command(FeatureSelection()) == [
+        "uv",
+        "sync",
+        "--locked",
+        "--no-dev",
+    ]
+
+
+def test_sync_command_contains_each_selected_extra_once() -> None:
+    selection = FeatureSelection(
+        camera="tapo",
+        transcription="faster",
+        voice="elevenlabs",
+        x_enabled=True,
+    )
+
+    assert setup.build_sync_command(selection) == [
+        "uv",
+        "sync",
+        "--locked",
+        "--no-dev",
+        "--extra",
+        "camera-tapo",
+        "--extra",
+        "transcription-faster",
+        "--extra",
+        "voice-elevenlabs",
+        "--extra",
+        "x",
+    ]
+
+
+def _make_fixture_workspace(root: Path) -> None:
+    (root / "pyproject.toml").write_text(
+        """
+[project]
+name = "fixture"
+version = "0.1.0"
+dependencies = [
+  "memory-mcp",
+  "desire-system",
+  "sociality-mcp",
+  "kernel-mcp",
+]
+"""
+    )
+    (root / "uv.lock").write_text("version = 1\n")
+
+
+def _run_setup_cli(*arguments: str, environment: dict[str, str] | None = None):
+    return subprocess.run(
+        [sys.executable, str(SETUP), *arguments],
+        cwd=ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_setup_help_lists_stable_profile_options() -> None:
+    result = _run_setup_cli("--help")
+
+    assert result.returncode == 0
+    assert "--profile" in result.stdout
+    assert "--with-camera" in result.stdout
+    assert "--with-transcription" in result.stdout
+    assert "--with-voice" in result.stdout
+    assert "--embedding-model" in result.stdout
+    assert "--dry-run" in result.stdout
+    assert "--trust-workspace" in result.stdout
+
+
+def test_noninteractive_core_dry_run_lists_only_core_servers() -> None:
+    before = _file_state(WORKSPACE_CONFIG)
+
+    result = _run_setup_cli(
+        "--profile",
+        "core",
+        "--non-interactive",
+        "--dry-run",
+    )
+
+    assert result.returncode == 0, result.stderr
+    config = json.loads(result.stdout)
+    assert tuple(config["mcpServers"]) == CORE_SERVER_NAMES
+    assert _file_state(WORKSPACE_CONFIG) == before
+
+
+def test_trust_workspace_dry_run_leaves_agy_settings_untouched(tmp_path: Path) -> None:
+    # The flag is parsed and threaded through; a dry run still has no side
+    # effects, and the override keeps the real ~/.gemini out of the test.
+    environment = os.environ.copy()
+    settings = tmp_path / "settings.json"
+    environment["AGY_CLI_SETTINGS_PATH"] = str(settings)
+    before = _file_state(WORKSPACE_CONFIG)
+
+    result = _run_setup_cli(
+        "--profile",
+        "core",
+        "--non-interactive",
+        "--trust-workspace",
+        "--dry-run",
+        environment=environment,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert tuple(json.loads(result.stdout)["mcpServers"]) == CORE_SERVER_NAMES
+    assert not settings.exists()
+    assert _file_state(WORKSPACE_CONFIG) == before
+
+
+def test_optional_dry_run_redacts_secrets() -> None:
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "TAPO_CAMERA_HOST": "192.0.2.10",
+            "TAPO_USERNAME": "private-user",
+            "TAPO_PASSWORD": "private-password",
+        }
+    )
+
+    result = _run_setup_cli(
+        "--profile",
+        "core",
+        "--with-camera",
+        "tapo",
+        "--non-interactive",
+        "--dry-run",
+        environment=environment,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "private-user" not in result.stdout
+    assert "private-password" not in result.stdout
+    assert result.stdout.count("<redacted>") == 2
+
+
+def test_noninteractive_selection_names_every_missing_variable() -> None:
+    environment = os.environ.copy()
+    for key in (
+        "XAI_API_KEY",
+        "X_CONSUMER_KEY",
+        "X_CONSUMER_SECRET",
+        "X_ACCESS_TOKEN",
+        "X_ACCESS_TOKEN_SECRET",
+    ):
+        environment.pop(key, None)
+
+    result = _run_setup_cli(
+        "--with-x",
+        "--non-interactive",
+        "--dry-run",
+        environment=environment,
+    )
+
+    assert result.returncode == 2
+    for key in (
+        "XAI_API_KEY",
+        "X_CONSUMER_KEY",
+        "X_CONSUMER_SECRET",
+        "X_ACCESS_TOKEN",
+        "X_ACCESS_TOKEN_SECRET",
+    ):
+        assert key in result.stderr
+
+
+def _all_environment(**overrides: str) -> dict[str, str]:
+    environment = os.environ.copy()
+    for key in TAPO_REQUIRED_ENVIRONMENT:
+        environment.pop(key, None)
+    environment.update(overrides)
+    return environment
+
+
+def test_all_dry_run_lists_every_supported_server() -> None:
+    # The hands-on needs every tool visible in /mcp, so --all has to cover the
+    # whole catalogue rather than a curated subset that drifts out of date.
+    result = _run_setup_cli("--all", "--dry-run", environment=_all_environment())
+
+    assert result.returncode == 0, result.stderr
+    config = json.loads(result.stdout)
+    assert set(config["mcpServers"]) == set(SERVER_SPECS)
+
+
+def test_all_generates_values_that_are_visibly_fake() -> None:
+    # A demo config that reads as real is worse than one announcing itself.
+    # The placeholder guard exists to stop example values reaching production,
+    # and --all is the one path allowed to write values it would reject.
+    result = _run_setup_cli("--all", "--dry-run", environment=_all_environment())
+
+    assert result.returncode == 0, result.stderr
+    config = json.loads(result.stdout)
+    assert "changeme" in config["mcpServers"]["wifi-cam"]["env"]["TAPO_CAMERA_HOST"]
+
+
+def test_all_keeps_credentials_that_are_already_real() -> None:
+    # --all is for making every server appear, not for overwriting a machine
+    # that is already configured.
+    environment = _all_environment(TAPO_CAMERA_HOST="192.0.2.10")
+
+    result = _run_setup_cli("--all", "--dry-run", environment=environment)
+
+    assert result.returncode == 0, result.stderr
+    config = json.loads(result.stdout)
+    host = config["mcpServers"]["wifi-cam"]["env"]["TAPO_CAMERA_HOST"]
+    assert host == "192.0.2.10"
+
+
+def test_all_sync_command_installs_every_extra() -> None:
+    command = setup.build_sync_command(onboarding.all_tools_selection())
+
+    assert command[:4] == ["uv", "sync", "--locked", "--no-dev"]
+    assert set(command[5::2]) == {
+        "camera-usb",
+        "camera-tapo",
+        "transcription-whisper",
+        "voice-voicevox",
+        "voice-elevenlabs",
+        "x",
+        "system-temperature",
+    }
+
+
+def test_dry_run_calls_no_side_effects(tmp_path: Path) -> None:
+    _make_fixture_workspace(tmp_path)
+    output = StringIO()
+
+    def unexpected_call(*_args, **_kwargs):
+        raise AssertionError("dry-run attempted a side effect")
+
+    result = execute_setup(
+        FeatureSelection(),
+        {},
+        repo_root=tmp_path,
+        home=tmp_path / "home",
+        dry_run=True,
+        force=False,
+        skip_model_download=False,
+        runner=unexpected_call,
+        doctor=unexpected_call,
+        output=output,
+    )
+
+    assert result == 0
+    assert not (tmp_path / ".agents").exists()
+    assert not (tmp_path / "socialPolicy.toml").exists()
+    assert set(json.loads(output.getvalue())["mcpServers"]) == set(CORE_SERVER_NAMES)
+
+
+def test_real_orchestration_syncs_once_writes_config_and_runs_doctor(
+    tmp_path: Path,
+) -> None:
+    _make_fixture_workspace(tmp_path)
+    policy_source = tmp_path / "examples" / "configs" / "socialPolicy.example.toml"
+    policy_source.parent.mkdir(parents=True)
+    policy_source.write_text('version = 1\nname = "fixture"\n')
+    commands: list[list[str]] = []
+    doctor_calls: list[tuple[Path, Path, Path]] = []
+    output = StringIO()
+
+    def fake_runner(command, **_kwargs):
+        commands.append(list(command))
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    def fake_doctor(repo_root, config_path, home, **_kwargs):
+        doctor_calls.append((repo_root, config_path, home))
+        return [CheckResult(CheckStatus.OK, "fixture", "ready")]
+
+    result = execute_setup(
+        FeatureSelection(),
+        {},
+        repo_root=tmp_path,
+        home=tmp_path / "home",
+        dry_run=False,
+        force=False,
+        skip_model_download=True,
+        runner=fake_runner,
+        doctor=fake_doctor,
+        output=output,
+    )
+
+    assert result == 0
+    assert commands == [["uv", "sync", "--locked", "--no-dev"]]
+    # The fixture had no .agents/; setup created it for the config.
+    config = json.loads((tmp_path / ".agents" / "mcp_config.json").read_text())
+    assert set(config["mcpServers"]) == set(CORE_SERVER_NAMES)
+    assert (tmp_path / "socialPolicy.toml").read_text() == policy_source.read_text()
+    assert doctor_calls == [
+        (tmp_path, tmp_path / ".agents" / "mcp_config.json", tmp_path / "home"),
+    ]
+    # Trust was not requested, so agy's settings under home stay untouched.
+    assert not (tmp_path / "home").exists()
+    printed = output.getvalue()
+    assert "Start agy in this repository (trust the folder when asked)." in printed
+    assert "Run /mcp" in printed
+    assert "Ask agy to remember" in printed
+    assert "Ask agy to recall" in printed
+    assert "Claude" not in printed
+
+
+def test_setup_warms_the_selected_embedding_model(tmp_path: Path) -> None:
+    _make_fixture_workspace(tmp_path)
+    policy_source = tmp_path / "examples" / "configs" / "socialPolicy.example.toml"
+    policy_source.parent.mkdir(parents=True)
+    policy_source.write_text('version = 1\nname = "fixture"\n')
+    calls: list[tuple[list[str], dict]] = []
+
+    def fake_runner(command, **kwargs):
+        calls.append((list(command), kwargs))
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    def fake_doctor(*_args, **_kwargs):
+        return [CheckResult(CheckStatus.OK, "fixture", "ready")]
+
+    result = execute_setup(
+        FeatureSelection(embedding_model="base"),
+        {},
+        repo_root=tmp_path,
+        home=tmp_path / "home",
+        dry_run=False,
+        force=False,
+        skip_model_download=False,
+        runner=fake_runner,
+        doctor=fake_doctor,
+        output=StringIO(),
+    )
+
+    assert result == 0
+    assert calls[0][0] == ["uv", "sync", "--locked", "--no-dev"]
+    assert calls[1][0][:5] == [
+        "uv",
+        "run",
+        "--package",
+        "memory-mcp",
+        "python",
+    ]
+    assert (
+        calls[1][1]["env"]["MEMORY_EMBEDDING_MODEL"]
+        == "intfloat/multilingual-e5-base"
+    )

@@ -1,0 +1,79 @@
+{
+  "embodied-agy-efpf": {
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run --directory .. --package kernel-mcp efpf-agy-hook pre-tool-use",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run --directory .. --package kernel-mcp efpf-agy-hook post-tool-use",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PreInvocation": [
+      {
+        "type": "command",
+        "command": "uv run --directory .. --package kernel-mcp efpf-agy-hook pre-invocation",
+        "timeout": 15
+      }
+    ],
+    "Stop": [
+      {
+        "type": "command",
+        "command": "uv run --directory .. --package kernel-mcp efpf-agy-hook stop",
+        "timeout": 10
+      }
+    ]
+  },
+  "embodied-agy-senses": {
+    "enabled": false,
+    "PreInvocation": [
+      {
+        "type": "command",
+        "command": "bash ./hooks/interoception.sh",
+        "timeout": 5
+      },
+      {
+        "type": "command",
+        "command": "bash ./hooks/auto-recall.sh",
+        "timeout": 10
+      },
+      {
+        "type": "command",
+        "command": "bash ./hooks/auto-social.sh",
+        "timeout": 5
+      },
+      {
+        "type": "command",
+        "command": "bash ./hooks/hearing-hook.sh",
+        "timeout": 10
+      }
+    ],
+    "Stop": [
+      {
+        "type": "command",
+        "command": "bash ./hooks/hearing-stop-hook.sh",
+        "timeout": 30
+      },
+      {
+        "type": "command",
+        "command": "bash ./hooks/continue-check.sh",
+        "timeout": 5
+      }
+    ]
+  }
+}

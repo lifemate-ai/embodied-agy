@@ -29,7 +29,6 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-
 DEFAULT_LOG_PATH = (
     Path.home() / ".gemini" / "memories" / "external_proposals.jsonl"
 )

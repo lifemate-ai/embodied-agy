@@ -1,0 +1,1056 @@
+"""Structured intentions, outcomes, and deterministic agency assessment."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import math
+import re
+import secrets
+import shlex
+from datetime import timedelta
+from enum import StrEnum
+from typing import Any
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+from social_core.db import SocialDB
+from social_core.time import parse_timestamp, utc_now
+
+from kernel_mcp.agy_tools import canonical_tool_call
+from kernel_mcp.body_contingency import (
+    BodyContingencyStore,
+    BodyObservation,
+    ContingencyVerdict,
+    commanded_delta_from_tool,
+    evaluate_reafference,
+)
+
+# Fallback causal fit when no body observation exists. This is the pre-PR-4
+# heuristic, kept so actions with no body channel score exactly as before.
+UNVERIFIED_CAUSAL_FIT_SUCCESS = 1.0
+UNVERIFIED_CAUSAL_FIT_FAILURE = 0.65
+
+# How long an intention may sit PENDING before recovery treats it as abandoned.
+# `hook_cli` runs the recovery on EVERY hook invocation, so without a window the
+# recovery closes intentions that were created moments ago and are about to be
+# used -- see `recover_dangling`. Five minutes is far longer than the gap between
+# proposing an action and issuing it, and far shorter than the gap left by a
+# session that died mid-action, which is what recovery exists for.
+RECOVERY_GRACE_SECONDS = 300.0
+
+
+class IntentionStatus(StrEnum):
+    PENDING = "PENDING"
+    ALLOWED = "ALLOWED"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+    UNKNOWN = "UNKNOWN"
+    DENIED = "DENIED"
+
+
+class ExpectedEffect(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    summary: str = Field(
+        default="",
+        description=(
+            "What you expect to observe on this channel, in a sentence. Leave "
+            "it empty only when you genuinely have no expectation: an empty "
+            "channel is excluded from the mismatch vector and lowers "
+            "prediction_coverage, which lowers the ownership you can claim."
+        ),
+    )
+    confidence: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        description="How sure you are of that expectation.",
+    )
+    expected_refs: list[str] = Field(
+        default_factory=list,
+        description="Content refs the result should mention, if you can name any.",
+    )
+
+
+class PredictedEffects(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    exteroceptive: ExpectedEffect = Field(
+        default_factory=ExpectedEffect,
+        description="What changes in the world, or in what you can see of it.",
+    )
+    interoceptive: ExpectedEffect = Field(
+        default_factory=ExpectedEffect,
+        description=(
+            "What changes in your own state: effort, uncertainty, what being "
+            "wrong here would cost you."
+        ),
+    )
+    social: ExpectedEffect = Field(
+        default_factory=ExpectedEffect,
+        description=(
+            "What changes for the person you are working with: what they learn, "
+            "gain, or have to do next."
+        ),
+    )
+    mnemonic: ExpectedEffect = Field(
+        default_factory=ExpectedEffect,
+        description=(
+            "What you expect to remember from this, or which belief it should "
+            "confirm or overturn."
+        ),
+    )
+
+
+# The channels a caller can make a claim about. Latency is scored separately
+# because it is measured whether or not anyone predicted it.
+PREDICTED_CHANNELS = ("exteroceptive", "interoceptive", "social", "mnemonic")
+
+
+class ActionProposal(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    field_id: str
+    tool_name: str
+    tool_input: dict[str, Any] = Field(default_factory=dict)
+    predicted_effects: PredictedEffects = Field(default_factory=PredictedEffects)
+    goal: str
+    confidence: float = Field(default=0.6, ge=0.0, le=1.0)
+    expected_latency_ms: int | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def _canonicalise_tool(self) -> ActionProposal:
+        # An intention proposed in Antigravity CLI's spelling (`call_mcp_tool`
+        # with ServerName/ToolName, `run_command` with CommandLine) must hash
+        # the same as the call the hook later sees, which arrives canonical.
+        self.tool_name, self.tool_input = canonical_tool_call(self.tool_name, self.tool_input)
+        return self
+
+
+class IntentionRecord(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    action_id: str
+    owner_id: str
+    field_id: str
+    tick_id: str
+    tool_name: str
+    tool_input_hash: str
+    normalized_tool_input: dict[str, Any]
+    intended_goal: str
+    predicted_effects: PredictedEffects
+    expected_latency_ms: int | None = None
+    confidence: float
+    status: IntentionStatus
+    created_at: str
+    closed_at: str | None = None
+
+
+class ActionOutcome(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    outcome_id: str
+    action_id: str
+    field_id: str
+    tick_id: str
+    actual_result_ref: str | None = None
+    actual_result_summary: str = ""
+    actual_result_hash: str | None = None
+    success: bool
+    latency_ms: int | None = None
+    mismatch_vector: dict[str, float] = Field(default_factory=dict)
+    ownership_score: float = Field(ge=0.0, le=1.0)
+    created_at: str
+
+
+class AgencyAssessment(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    registered_intention: float = Field(ge=0.0, le=1.0)
+    action_effect_match: float = Field(ge=0.0, le=1.0)
+    temporal_contiguity: float = Field(ge=0.0, le=1.0)
+    exclusive_causal_fit: float = Field(ge=0.0, le=1.0)
+    prediction_coverage: float = Field(default=0.0, ge=0.0, le=1.0)
+    ownership_score: float = Field(ge=0.0, le=1.0)
+    rationale: list[str] = Field(default_factory=list)
+
+
+class AgencyStore:
+    """Persistence and matching rules for the closed action loop."""
+
+    def __init__(self, db: SocialDB) -> None:
+        self._db = db
+
+    def propose(self, proposal: ActionProposal, *, owner_id: str = "self") -> IntentionRecord:
+        field = self._db.fetchone(
+            """
+            SELECT tick_id, status, continuity_token FROM enacted_fields
+            WHERE field_id = ? AND owner_id = ?
+            """,
+            (proposal.field_id, owner_id),
+        )
+        if field is None:
+            raise ValueError(f"unknown field {proposal.field_id!r}")
+        if field["status"] != "COMMITTED":
+            # The caller cannot guarantee the field it names is still current: it
+            # learned that id from a tool call, and every tool RESULT commits a
+            # new field which invalidates the previous one. Demanding COMMITTED
+            # here refused correct callers purely on timing, and was the second
+            # of the two errors that made every step cost a re-proposal.
+            #
+            # A field superseded inside the same continuity is just the clock
+            # moving, so the intention may still be formed against it. A field
+            # from another lineage is a different matter and stays refused.
+            current = self._db.fetchone(
+                """
+                SELECT continuity_token FROM enacted_fields
+                WHERE owner_id = ? AND status = 'COMMITTED'
+                """,
+                (owner_id,),
+            )
+            same_lineage = (
+                current is not None
+                and current["continuity_token"] == field["continuity_token"]
+            )
+            if not same_lineage:
+                raise ValueError("actions require a field from the current continuity")
+        existing = self.get_pending(owner_id)
+        if existing is not None:
+            raise ValueError(
+                f"owner {owner_id!r} already has pending intention {existing.action_id!r}"
+            )
+
+        normalized = normalize_tool_input(proposal.tool_input)
+        action_id = f"act_{secrets.token_urlsafe(12)}"
+        now = utc_now()
+        with self._db.transaction() as connection:
+            connection.execute(
+                """
+                INSERT INTO field_intentions(
+                    action_id, owner_id, field_id, tick_id, tool_name,
+                    tool_input_hash, normalized_tool_input_json, intended_goal,
+                    predicted_effects_json, expected_latency_ms, confidence,
+                    status, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?)
+                """,
+                (
+                    action_id,
+                    owner_id,
+                    proposal.field_id,
+                    field["tick_id"],
+                    proposal.tool_name,
+                    hash_tool_input(proposal.tool_input),
+                    json.dumps(normalized, ensure_ascii=False, sort_keys=True),
+                    proposal.goal,
+                    json.dumps(
+                        proposal.predicted_effects.model_dump(mode="json"),
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    ),
+                    proposal.expected_latency_ms,
+                    proposal.confidence,
+                    now,
+                ),
+            )
+            connection.execute(
+                """
+                UPDATE enacted_fields
+                SET pending_intention_ref = ?,
+                    agency_state_json = ?,
+                    updated_at = ?
+                WHERE field_id = ?
+                """,
+                (
+                    action_id,
+                    json.dumps(
+                        {
+                            "pending_intention_ref": action_id,
+                            "ownership_score": 0.0,
+                            "last_outcome_ref": None,
+                            "registered_intention": True,
+                        },
+                        sort_keys=True,
+                    ),
+                    now,
+                    proposal.field_id,
+                ),
+            )
+        record = self.get(action_id)
+        assert record is not None
+        return record
+
+    def get(self, action_id: str) -> IntentionRecord | None:
+        row = self._db.fetchone(
+            "SELECT * FROM field_intentions WHERE action_id = ?", (action_id,)
+        )
+        return None if row is None else self._row_to_intention(row)
+
+    def get_pending(self, owner_id: str = "self") -> IntentionRecord | None:
+        row = self._db.fetchone(
+            """
+            SELECT * FROM field_intentions
+            WHERE owner_id = ? AND status IN ('PENDING', 'ALLOWED')
+            ORDER BY created_at DESC LIMIT 1
+            """,
+            (owner_id,),
+        )
+        return None if row is None else self._row_to_intention(row)
+
+    def match_pending(
+        self,
+        *,
+        owner_id: str,
+        tool_name: str,
+        tool_input: dict[str, Any],
+    ) -> tuple[bool, str, IntentionRecord | None]:
+        tool_name, tool_input = canonical_tool_call(tool_name, tool_input)
+        pending = self.get_pending(owner_id)
+        if pending is None:
+            return False, "no matching pending intention", None
+        if pending.tool_name != tool_name:
+            return (
+                False,
+                f"intention tool mismatch: expected {pending.tool_name!r}",
+                pending,
+            )
+        actual_hash = hash_tool_input(tool_input)
+        if pending.tool_input_hash != actual_hash:
+            return False, "intention tool input hash mismatch", pending
+        return True, "pending intention matches tool and normalized input", pending
+
+    def mark_allowed(self, action_id: str) -> IntentionRecord:
+        self._db.execute(
+            """
+            UPDATE field_intentions SET status = 'ALLOWED'
+            WHERE action_id = ? AND status = 'PENDING'
+            """,
+            (action_id,),
+        )
+        record = self.get(action_id)
+        if record is None:
+            raise ValueError(f"unknown intention {action_id!r}")
+        return record
+
+    def mark_denied(self, action_id: str) -> IntentionRecord:
+        now = utc_now()
+        self._db.execute(
+            """
+            UPDATE field_intentions SET status = 'DENIED', closed_at = ?
+            WHERE action_id = ? AND status IN ('PENDING', 'ALLOWED')
+            """,
+            (now, action_id),
+        )
+        record = self.get(action_id)
+        if record is None:
+            raise ValueError(f"unknown intention {action_id!r}")
+        return record
+
+    def close(
+        self,
+        *,
+        action_id: str,
+        actual_result_summary: str,
+        success: bool,
+        actual_result_ref: str | None = None,
+        latency_ms: int | None = None,
+        body_observation: BodyObservation | None = None,
+    ) -> tuple[ActionOutcome, AgencyAssessment]:
+        intention = self.get(action_id)
+        if intention is None:
+            raise ValueError(f"unknown intention {action_id!r}")
+        existing = self.outcome_for_action(action_id)
+        if existing is not None:
+            assessment = self._assessment_from_outcome(existing)
+            return existing, assessment
+
+        mismatch = self._mismatch_vector(
+            intention=intention,
+            actual_result_summary=actual_result_summary,
+            success=success,
+            latency_ms=latency_ms,
+        )
+        causal_fit, reafference = self._causal_fit(
+            intention=intention,
+            success=success,
+            body_observation=body_observation,
+            latency_ms=latency_ms,
+        )
+        assessment = self.assess(
+            registered_intention=True,
+            mismatch_vector=mismatch,
+            latency_ms=latency_ms,
+            expected_latency_ms=intention.expected_latency_ms,
+            exclusive_causal_fit=causal_fit,
+            prediction_coverage=self._prediction_coverage(intention.predicted_effects),
+        )
+        outcome_id = f"out_{secrets.token_urlsafe(12)}"
+        now = utc_now()
+        result_hash = hashlib.sha256(actual_result_summary.encode("utf-8")).hexdigest()
+        status = IntentionStatus.COMPLETED if success else IntentionStatus.FAILED
+        with self._db.transaction() as connection:
+            connection.execute(
+                """
+                INSERT INTO field_action_outcomes(
+                    outcome_id, action_id, field_id, tick_id, actual_result_ref,
+                    actual_result_summary, actual_result_hash, success, latency_ms,
+                    mismatch_vector_json, ownership_score, agency_assessment_json,
+                    created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    outcome_id,
+                    intention.action_id,
+                    intention.field_id,
+                    intention.tick_id,
+                    actual_result_ref,
+                    actual_result_summary[:2000],
+                    result_hash,
+                    1 if success else 0,
+                    latency_ms,
+                    json.dumps(mismatch, sort_keys=True),
+                    assessment.ownership_score,
+                    json.dumps(assessment.model_dump(mode="json"), sort_keys=True),
+                    now,
+                ),
+            )
+            connection.execute(
+                """
+                UPDATE field_intentions SET status = ?, closed_at = ?
+                WHERE action_id = ?
+                """,
+                (status.value, now, action_id),
+            )
+            connection.execute(
+                """
+                UPDATE enacted_fields
+                SET pending_intention_ref = NULL,
+                    agency_state_json = ?,
+                    updated_at = ?
+                WHERE field_id = ?
+                """,
+                (
+                    json.dumps(
+                        {
+                            "pending_intention_ref": None,
+                            "ownership_score": assessment.ownership_score,
+                            "last_outcome_ref": outcome_id,
+                            "registered_intention": True,
+                        },
+                        sort_keys=True,
+                    ),
+                    now,
+                    intention.field_id,
+                ),
+            )
+        outcome = self.outcome_for_action(action_id)
+        assert outcome is not None
+        return outcome, assessment
+
+    def _causal_fit(
+        self,
+        *,
+        intention: IntentionRecord,
+        success: bool,
+        body_observation: BodyObservation | None,
+        latency_ms: int | None,
+    ) -> tuple[float, Any]:
+        """Derive exclusive causal fit from the reafference when one exists.
+
+        Without a body observation there is nothing to compare, so the old
+        success heuristic stands and the verdict is recorded as UNVERIFIED
+        rather than dressed up as evidence.
+        """
+        commanded = commanded_delta_from_tool(
+            intention.tool_name, intention.normalized_tool_input
+        )
+        observation = body_observation
+        if observation is not None and observation.observed_latency_ms is None:
+            observation = observation.model_copy(
+                update={"observed_latency_ms": latency_ms}
+            )
+        verdict = evaluate_reafference(
+            commanded_delta=commanded,
+            observation=observation,
+            expected_latency_ms=intention.expected_latency_ms,
+        )
+        try:
+            BodyContingencyStore(self._db).record(
+                verdict=verdict,
+                observation=observation,
+                action_id=intention.action_id,
+                field_id=intention.field_id,
+                tick_id=intention.tick_id,
+                expected_latency_ms=intention.expected_latency_ms,
+            )
+        except Exception:
+            # The ledger is an audit trail, not a precondition for closing an
+            # action. A storage fault must not strand a pending intention.
+            pass
+        if verdict.verdict is ContingencyVerdict.UNVERIFIED:
+            fallback = (
+                UNVERIFIED_CAUSAL_FIT_SUCCESS
+                if success
+                else UNVERIFIED_CAUSAL_FIT_FAILURE
+            )
+            return fallback, verdict
+        return verdict.score, verdict
+
+    def assess_uncommanded_outcome(
+        self,
+        *,
+        effect_match: float,
+        temporal_contiguity: float = 0.5,
+        exclusive_causal_fit: float = 0.2,
+    ) -> AgencyAssessment:
+        ownership = _clamp01(
+            0.35 * 0.0
+            + 0.30 * _clamp01(effect_match)
+            + 0.20 * _clamp01(temporal_contiguity)
+            + 0.15 * _clamp01(exclusive_causal_fit)
+        )
+        return AgencyAssessment(
+            registered_intention=0.0,
+            action_effect_match=_clamp01(effect_match),
+            temporal_contiguity=_clamp01(temporal_contiguity),
+            exclusive_causal_fit=_clamp01(exclusive_causal_fit),
+            ownership_score=ownership,
+            rationale=["no registered intention; ownership remains low"],
+        )
+
+    def assess(
+        self,
+        *,
+        registered_intention: bool,
+        mismatch_vector: dict[str, float],
+        latency_ms: int | None,
+        expected_latency_ms: int | None,
+        exclusive_causal_fit: float,
+        prediction_coverage: float = 0.0,
+    ) -> AgencyAssessment:
+        """Score how much of this outcome the agent can claim to have caused.
+
+        `action_effect_match` is scaled by coverage deliberately. Being right
+        about the channels you happened to mention says nothing about the ones
+        you did not, and the mismatch vector no longer invents a verdict for
+        those. Without the scaling, saying nothing would leave only latency in
+        the mean and outscore a partly-wrong prediction -- which is exactly
+        what taught callers to leave the channels empty.
+        """
+
+        mismatch = (
+            sum(_clamp01(value) for value in mismatch_vector.values())
+            / len(mismatch_vector)
+            if mismatch_vector
+            else 0.5
+        )
+        coverage = _clamp01(prediction_coverage)
+        effect_match = _clamp01(coverage * (1.0 - mismatch))
+        temporal = _temporal_contiguity(latency_ms, expected_latency_ms)
+        registered = 1.0 if registered_intention else 0.0
+        ownership = _clamp01(
+            0.35 * registered
+            + 0.30 * effect_match
+            + 0.20 * temporal
+            + 0.15 * _clamp01(exclusive_causal_fit)
+        )
+        return AgencyAssessment(
+            registered_intention=registered,
+            action_effect_match=effect_match,
+            temporal_contiguity=temporal,
+            exclusive_causal_fit=_clamp01(exclusive_causal_fit),
+            prediction_coverage=coverage,
+            ownership_score=ownership,
+            rationale=[
+                "registered intention present"
+                if registered_intention
+                else "no registered intention",
+                f"mean prediction mismatch={mismatch:.3f}",
+                f"prediction coverage={coverage:.2f}",
+            ],
+        )
+
+    def recover_dangling(
+        self,
+        owner_id: str = "self",
+        *,
+        older_than_seconds: float = RECOVERY_GRACE_SECONDS,
+    ) -> list[ActionOutcome]:
+        """Close intentions a previous runtime abandoned -- and only those.
+
+        The staleness predicate is the entire point of this function and it was
+        missing: every PENDING row was closed on sight. Because `hook_cli` calls
+        the recovery on EVERY hook invocation, an intention created milliseconds
+        earlier was killed by the next hook to fire, and `recover_stale_runtime`
+        then invalidated the field that intention pointed at. The caller saw
+        "no matching pending intention" and "actions require a COMMITTED field"
+        -- 308 of 477 gate refusals in a single observed session -- and had to
+        re-propose before every step.
+
+        The grace window preserves the real use case, a session that died
+        mid-action, while leaving live intentions alone.
+        """
+        # The comparison below is `<=`, not `<`. Both sides are second-granular
+        # (`utc_now` uses timespec="seconds"), so with a zero window the cutoff
+        # lands on the same second as anything just created and a strict
+        # comparison recovers nothing at all -- which is how the crash-recovery
+        # test caught this. At the default window the cutoff is 300s in the past,
+        # so a live intention is still never caught.
+        cutoff = (
+            parse_timestamp(utc_now()) - timedelta(seconds=older_than_seconds)
+        ).isoformat(timespec="seconds")
+        rows = self._db.fetchall(
+            """
+            SELECT action_id FROM field_intentions
+            WHERE owner_id = ? AND status IN ('PENDING', 'ALLOWED')
+              AND created_at <= ?
+            ORDER BY created_at ASC
+            """,
+            (owner_id, cutoff),
+        )
+        recovered: list[ActionOutcome] = []
+        for row in rows:
+            action_id = row["action_id"]
+            outcome, _ = self.close(
+                action_id=action_id,
+                actual_result_summary="runtime recovered before a tool outcome was recorded",
+                success=False,
+                actual_result_ref="recovery:unknown",
+            )
+            self._db.execute(
+                "UPDATE field_intentions SET status = 'UNKNOWN' WHERE action_id = ?",
+                (action_id,),
+            )
+            recovered.append(outcome)
+        return recovered
+
+    def outcome_for_action(self, action_id: str) -> ActionOutcome | None:
+        row = self._db.fetchone(
+            "SELECT * FROM field_action_outcomes WHERE action_id = ?", (action_id,)
+        )
+        if row is None:
+            return None
+        return ActionOutcome(
+            outcome_id=row["outcome_id"],
+            action_id=row["action_id"],
+            field_id=row["field_id"],
+            tick_id=row["tick_id"],
+            actual_result_ref=row["actual_result_ref"],
+            actual_result_summary=row["actual_result_summary"],
+            actual_result_hash=row["actual_result_hash"],
+            success=bool(row["success"]),
+            latency_ms=row["latency_ms"],
+            mismatch_vector=json.loads(row["mismatch_vector_json"] or "{}"),
+            ownership_score=float(row["ownership_score"]),
+            created_at=row["created_at"],
+        )
+
+    @staticmethod
+    def _prediction_coverage(effects: PredictedEffects) -> float:
+        """How much of the predictable surface was claimed before acting.
+
+        Counts channels carrying a real expectation rather than channels
+        present on the object: every channel is always present, and three of
+        them were usually empty.
+        """
+
+        declared = sum(
+            1
+            for channel in PREDICTED_CHANNELS
+            if _tokens(getattr(effects, channel).summary)
+        )
+        return declared / len(PREDICTED_CHANNELS)
+
+    @staticmethod
+    def _mismatch_vector(
+        *,
+        intention: IntentionRecord,
+        actual_result_summary: str,
+        success: bool,
+        latency_ms: int | None,
+    ) -> dict[str, float]:
+        actual_tokens = _tokens(actual_result_summary)
+        effects = intention.predicted_effects
+        mismatch: dict[str, float] = {}
+        for channel in PREDICTED_CHANNELS:
+            expected_tokens = _tokens(getattr(effects, channel).summary)
+            if not expected_tokens:
+                # A channel nobody spoke about is not a failed prediction.
+                # Scoring it as one (0.25 on success, 0.75 on failure) buried
+                # the real signal: three channels were usually silent, so most
+                # of the mean feeding ownership measured nothing. It also made
+                # silence cheaper than speech, since a real prediction was
+                # floored at 0.8 on failure while silence sat at 0.75. Absence
+                # is now paid for by prediction_coverage instead.
+                continue
+            overlap = len(expected_tokens & actual_tokens) / len(expected_tokens)
+            value = 1.0 - overlap
+            if not success:
+                value = max(value, 0.8)
+            mismatch[channel] = round(_clamp01(value), 6)
+        mismatch["latency"] = round(
+            1.0 - _temporal_contiguity(latency_ms, intention.expected_latency_ms), 6
+        )
+        return mismatch
+
+    @staticmethod
+    def _row_to_intention(row) -> IntentionRecord:
+        return IntentionRecord(
+            action_id=row["action_id"],
+            owner_id=row["owner_id"],
+            field_id=row["field_id"],
+            tick_id=row["tick_id"],
+            tool_name=row["tool_name"],
+            tool_input_hash=row["tool_input_hash"],
+            normalized_tool_input=json.loads(row["normalized_tool_input_json"] or "{}"),
+            intended_goal=row["intended_goal"],
+            predicted_effects=PredictedEffects.model_validate(
+                json.loads(row["predicted_effects_json"] or "{}")
+            ),
+            expected_latency_ms=row["expected_latency_ms"],
+            confidence=float(row["confidence"]),
+            status=row["status"],
+            created_at=row["created_at"],
+            closed_at=row["closed_at"],
+        )
+
+    def _assessment_from_outcome(self, outcome: ActionOutcome) -> AgencyAssessment:
+        row = self._db.fetchone(
+            "SELECT agency_assessment_json FROM field_action_outcomes WHERE outcome_id = ?",
+            (outcome.outcome_id,),
+        )
+        if row is None:
+            raise RuntimeError("outcome assessment is missing")
+        return AgencyAssessment.model_validate(
+            json.loads(row["agency_assessment_json"] or "{}")
+        )
+
+
+def normalize_tool_input(tool_input: dict[str, Any]) -> dict[str, Any]:
+    """Return a stable JSON-compatible representation."""
+
+    return json.loads(
+        json.dumps(tool_input, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    )
+
+
+def hash_tool_input(tool_input: dict[str, Any]) -> str:
+    normalized = json.dumps(
+        normalize_tool_input(tool_input),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def is_external_tool(tool_name: str, tool_input: dict[str, Any] | None = None) -> bool:
+    """Classify tool calls that can change the body, filesystem, or network."""
+
+    tool_name, tool_input = canonical_tool_call(tool_name, tool_input)
+    name = tool_name.lower()
+    if name.startswith("mcp__kernel__"):
+        return False
+    external_fragments = (
+        "__say",
+        "__speak",
+        "__post",
+        "__notify",
+        "__look_",
+        "__camera_go",
+        "__turn_on",
+        "__turn_off",
+        "__set_",
+        "__toggle",
+        "__activate",
+        "__create_",
+        "__move",
+        "__send",
+        "__forward",
+        "__archive",
+        "__trash",
+        "__apply_label",
+        "__remove_label",
+        "__deploy",
+        "__publish",
+        "__install",
+        "__uninstall",
+        "__merge",
+        "__push",
+        "__add_comment",
+        "__respond",
+        "__cancel",
+        "__reschedule",
+        "__update_event",
+        "__tweet",
+        "__reply",
+        "__like",
+        "__repost",
+        "__delete",
+        "__remember",
+        "__save_visual_memory",
+        "__save_audio_memory",
+        "mcp__tts__",
+    )
+    if any(fragment in name for fragment in external_fragments):
+        return True
+    if tool_name in {"Write", "Edit", "NotebookEdit"}:
+        return True
+    # Antigravity CLI exposes PowerShell as a tool of its own on Windows, where it is
+    # the primary shell. There is no _powershell_is_read_only() counterpart yet,
+    # and a wrong read-only verdict would reopen the bypass this branch closes,
+    # so every PowerShell call counts as outward.
+    if tool_name == "PowerShell":
+        return True
+    if tool_name == "Bash":
+        command = str((tool_input or {}).get("command", ""))
+        return not _bash_is_read_only(command)
+    if name.startswith("mcp__"):
+        internal_fragments = (
+            "__get_",
+            "__query_",
+            "__list_",
+            "__search_",
+            "__read_",
+            "__recall",
+            "__introspect",
+            "__diagnostic",
+            "__check_",
+            "__see",
+            "__capture",
+            "__begin_subjective_tick",
+            "__add_workspace_candidate",
+            "__commit_subjective_field",
+            "__propose_field_action",
+            "__close_field_action",
+            "__close_subjective_tick",
+            "__run_field_ablation",
+            "__pause_field_runtime",
+            "__resume_field_runtime",
+            "__evaluate_action",
+            "__compose_",
+            "__plan_response",
+        )
+        return not any(fragment in name for fragment in internal_fragments)
+    return False
+
+
+_SHELL_SEPARATORS = frozenset({"|", "||", "&&", ";", ";;", "&"})
+_DISCARD_TARGETS = frozenset({"/dev/null"})
+
+
+def _is_redirection(token: str) -> bool:
+    return bool(token) and set(token) <= {"<", ">", "&"} and ">" in token
+
+
+def _shell_segments(command: str) -> list[list[str]] | None:
+    """Split into command segments at unquoted operators, or None if unsafe.
+
+    `shlex` with `punctuation_chars` yields operators as their own tokens and
+    leaves quoted text alone. Splitting the raw string could not tell the two
+    apart: a pipe inside a regex ended the command and left an unbalanced
+    quote, so an ordinary `grep` read as a write and was refused.
+
+    Returns None when the command redirects anywhere but /dev/null, which is
+    the write this whole function exists to catch.
+    """
+
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    try:
+        tokens = list(lexer)
+    except ValueError:
+        return None
+
+    segments: list[list[str]] = []
+    current: list[str] = []
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        index += 1
+        if token in _SHELL_SEPARATORS:
+            segments.append(current)
+            current = []
+            continue
+        if _is_redirection(token):
+            if current and re.fullmatch(r"\d+", current[-1]):
+                current.pop()  # the file descriptor, e.g. the 2 of `2>`
+            if token.endswith("&"):
+                # Duplicating onto another descriptor writes nowhere new.
+                if index < len(tokens) and re.fullmatch(r"\d+", tokens[index]):
+                    index += 1
+                    continue
+                return None
+            if index < len(tokens) and tokens[index] in _DISCARD_TARGETS:
+                index += 1
+                continue
+            return None
+        current.append(token)
+    segments.append(current)
+    return segments
+
+
+def _bash_is_read_only(command: str) -> bool:
+    """Conservatively recognize terminal-only inspection commands."""
+
+    if not command.strip() or "$(" in command or "`" in command:
+        return False
+    segments = _shell_segments(command)
+    if segments is None:
+        return False
+    read_only = {
+        "[",
+        "awk",
+        "basename",
+        "cat",
+        "cd",
+        "cut",
+        "date",
+        "df",
+        "dirname",
+        "du",
+        "echo",
+        "fd",
+        "file",
+        "find",
+        "git",
+        "grep",
+        "head",
+        "id",
+        "jq",
+        "less",
+        "ls",
+        "md5sum",
+        "more",
+        "nl",
+        "printenv",
+        "printf",
+        "pwd",
+        "readlink",
+        "realpath",
+        "rg",
+        "sed",
+        "sha1sum",
+        "sha256sum",
+        "sort",
+        "stat",
+        "tail",
+        "test",
+        "tr",
+        "true",
+        "type",
+        "uname",
+        "uniq",
+        "wc",
+        "which",
+        "whoami",
+    }
+    for tokens in segments:
+        while tokens and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", tokens[0]):
+            tokens.pop(0)
+        if not tokens:
+            continue
+        executable = tokens[0].rsplit("/", 1)[-1]
+        if executable not in read_only:
+            return False
+        if executable == "sed" and any(
+            token == "-i" or token.startswith("-i") for token in tokens[1:]
+        ):
+            return False
+        if executable == "find" and any(
+            token in {"-delete", "-exec", "-execdir", "-ok", "-okdir"}
+            for token in tokens[1:]
+        ):
+            return False
+        if executable == "git" and not _git_is_read_only(tokens[1:]):
+            return False
+        if executable == "awk" and any(">" in token or "system(" in token for token in tokens[1:]):
+            return False
+    return True
+
+
+# Global git options that consume the token after them. Without this the scan
+# for the first non-flag token returns the option's value -- `git -C <path>
+# status` read as the unknown subcommand `<path>` and was refused.
+_GIT_VALUE_OPTIONS = frozenset(
+    {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--super-prefix"}
+)
+
+
+def _git_from_subcommand(arguments: list[str]) -> list[str]:
+    """Drop leading global options and return the subcommand with its own arguments."""
+
+    index = 0
+    while index < len(arguments):
+        token = arguments[index]
+        if token in _GIT_VALUE_OPTIONS:
+            index += 2  # the option and the value it takes
+            continue
+        if token.startswith("-"):
+            index += 1  # a flag, or --option=value carrying its own value
+            continue
+        return arguments[index:]
+    return []
+
+
+def _git_is_read_only(arguments: list[str]) -> bool:
+    if not arguments:
+        return True
+    arguments = _git_from_subcommand(arguments)
+    command = arguments[0] if arguments else ""
+    if command in {
+        "diff",
+        "grep",
+        "log",
+        "ls-files",
+        "ls-tree",
+        "rev-parse",
+        "show",
+        "status",
+        "tag",
+    }:
+        return True
+    if command == "branch":
+        return all(
+            item in {"branch", "--show-current", "--list", "-a", "-r", "-v", "-vv"}
+            for item in arguments
+        )
+    if command == "remote":
+        return all(item in {"remote", "-v", "--verbose"} for item in arguments)
+    return False
+
+
+def _tokens(text: str) -> set[str]:
+    """Tokenize for mismatch overlap; ASCII words plus non-ASCII bigrams.
+
+    Whole-word matching collapses Japanese summaries into one giant token, so
+    non-ASCII runs are compared as character bigrams instead. ASCII behavior
+    is unchanged.
+    """
+    lowered = text.lower()
+    tokens = {
+        token
+        for token in re.findall(r"[a-z0-9_-]+", lowered)
+        if len(token) > 2
+    }
+    for run in re.findall(r"[^\x00-\x7f]+", lowered):
+        if len(run) == 1:
+            tokens.add(run)
+        else:
+            tokens.update(run[i : i + 2] for i in range(len(run) - 1))
+    return tokens
+
+
+def _temporal_contiguity(
+    latency_ms: int | None,
+    expected_latency_ms: int | None,
+) -> float:
+    if latency_ms is None:
+        return 0.5
+    if expected_latency_ms is None:
+        return math.exp(-max(0, latency_ms - 5000) / 15000)
+    scale = max(500.0, float(expected_latency_ms))
+    return _clamp01(math.exp(-abs(latency_ms - expected_latency_ms) / (2.0 * scale)))
+
+
+def _clamp01(value: float) -> float:
+    return max(0.0, min(1.0, float(value)))

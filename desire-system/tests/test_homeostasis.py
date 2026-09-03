@@ -1,5 +1,6 @@
 """Tests for homeostasis / allostasis extensions to the desire system."""
 
+import importlib
 import json
 import tempfile
 from datetime import datetime, timedelta, timezone
@@ -8,6 +9,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+import desire_updater
 from desire_updater import (
     DESIRE_CONFIGS,
     DesireState,
@@ -40,9 +42,38 @@ class TestDesireConfig:
         assert "cognitive_load" in DESIRE_CONFIGS
 
     def test_identity_coherence_set_point_is_high(self):
-        """identity_coherence のセットポイントは高い（自分がここねである確信）"""
+        """identity_coherence のセットポイントは高い（自分が自分である確信）"""
         cfg = DESIRE_CONFIGS["identity_coherence"]
         assert cfg.set_point >= 0.8
+
+    def test_identity_coherence_follows_self_name(self, monkeypatch):
+        """identity_coherence は SELF_NAME / SELF_PRONOUN に追従する。
+
+        エージェント名がベタ書きだと、別の名前で運用している個体では
+        キーワードが一致せず、自己同一性の欲求だけが満たされにくくなる。
+        キーワード不一致は例外もログも出さないため、「最近その話題が
+        なかっただけ」と区別がつかない。
+        """
+        monkeypatch.setenv("SELF_NAME", "クロコ")
+        monkeypatch.setenv("SELF_PRONOUN", "わたし")
+        module = importlib.reload(desire_updater)
+        try:
+            cfg = module.DESIRE_CONFIGS["identity_coherence"]
+
+            assert "クロコとして" in cfg.keywords
+            assert "わたしは" in cfg.keywords
+            assert "自分がクロコ" in cfg.keywords
+            assert cfg.label == "自分がクロコである確信"
+
+            # 名前に依存しないキーワードは残す（recall 由来の満足を拾うため）
+            assert "思い出した" in cfg.keywords
+
+            # 別名の痕跡が残っていないこと
+            assert not any("ここね" in kw for kw in cfg.keywords)
+            assert "ここね" not in cfg.label
+        finally:
+            monkeypatch.undo()
+            importlib.reload(desire_updater)
 
     def test_original_desires_preserved(self):
         """既存の4欲求が残っている"""
@@ -226,6 +257,98 @@ class TestAllostasis:
         # つまり深夜は「一人でも平気」= 満たされてない(level高い)けど不快度の性質が変わる
         # ここでは、深夜と日中で不快度が異なることだけを確認する
         assert state_night.discomforts["miss_companion"] != state_day.discomforts["miss_companion"]
+
+
+class TestAllostasisConfigurableQuietHours:
+    """時間帯判定は DESIRE_TIMEZONE / DESIRE_NIGHT_* / DESIRE_DAWN_END に従う。
+
+    固定だと JST 以外の地域では現地の昼間に深夜モードが発火する。エラーもログも
+    出ないので、外からは見えない（#135）。
+    """
+
+    def _clear(self, monkeypatch):
+        for key in ("DESIRE_TIMEZONE", "DESIRE_NIGHT_START", "DESIRE_NIGHT_END", "DESIRE_DAWN_END"):
+            monkeypatch.delenv(key, raising=False)
+
+    def test_defaults_are_jst_and_zero_to_five(self, monkeypatch):
+        """env 未設定なら従来どおり: UTC 18:00 = JST 03:00 は深夜帯。"""
+        self._clear(monkeypatch)
+        from desire_updater import quiet_bands, resolve_timezone
+
+        assert quiet_bands() == (0, 5, 7)
+        probe = datetime(2026, 4, 8, 0, 0, 0, tzinfo=timezone.utc)
+        assert probe.astimezone(resolve_timezone()).utcoffset() == timedelta(hours=9)
+
+        base_sp = DESIRE_CONFIGS["miss_companion"].set_point
+        utc_evening = datetime(2026, 4, 8, 18, 0, 0, tzinfo=timezone.utc)  # 03:00 JST
+        assert get_allostatic_set_point("miss_companion", utc_evening) == pytest.approx(
+            base_sp - 0.15
+        )
+
+    def test_other_timezone_shifts_the_band(self, monkeypatch):
+        """同じ UTC 瞬間でも、タイムゾーンが違えば深夜かどうかが変わる。"""
+        self._clear(monkeypatch)
+        base_sp = DESIRE_CONFIGS["miss_companion"].set_point
+        instant = datetime(2026, 4, 8, 8, 0, 0, tzinfo=timezone.utc)  # 17:00 JST / 03:00 New York
+
+        assert get_allostatic_set_point("miss_companion", instant) == pytest.approx(base_sp)
+
+        monkeypatch.setenv("DESIRE_TIMEZONE", "America/New_York")
+        assert get_allostatic_set_point("miss_companion", instant) == pytest.approx(
+            base_sp - 0.15
+        )
+
+    def test_fixed_offset_timezone_is_accepted(self, monkeypatch):
+        self._clear(monkeypatch)
+        monkeypatch.setenv("DESIRE_TIMEZONE", "-05:00")
+        from desire_updater import resolve_timezone
+
+        probe = datetime(2026, 4, 8, 0, 0, 0, tzinfo=timezone.utc)
+        assert probe.astimezone(resolve_timezone()).utcoffset() == timedelta(hours=-5)
+
+        base_sp = DESIRE_CONFIGS["miss_companion"].set_point
+        instant = datetime(2026, 4, 8, 8, 0, 0, tzinfo=timezone.utc)  # 03:00 at -05:00
+        assert get_allostatic_set_point("miss_companion", instant) == pytest.approx(
+            base_sp - 0.15
+        )
+
+    def test_unknown_timezone_falls_back_to_jst(self, monkeypatch):
+        self._clear(monkeypatch)
+        monkeypatch.setenv("DESIRE_TIMEZONE", "Not/AZone")
+        from desire_updater import resolve_timezone
+
+        probe = datetime(2026, 4, 8, 0, 0, 0, tzinfo=timezone.utc)
+        assert probe.astimezone(resolve_timezone()).utcoffset() == timedelta(hours=9)
+
+    def test_wrap_around_night_band(self, monkeypatch):
+        """NIGHT_START=22, NIGHT_END=5 なら 23 時も 3 時も深夜、12 時は昼。"""
+        self._clear(monkeypatch)
+        monkeypatch.setenv("DESIRE_TIMEZONE", "+09:00")
+        monkeypatch.setenv("DESIRE_NIGHT_START", "22")
+        monkeypatch.setenv("DESIRE_NIGHT_END", "5")
+        monkeypatch.setenv("DESIRE_DAWN_END", "7")
+        jst = timezone(timedelta(hours=9))
+        base_sp = DESIRE_CONFIGS["miss_companion"].set_point
+
+        at_23 = datetime(2026, 4, 8, 23, 0, 0, tzinfo=jst)
+        at_03 = datetime(2026, 4, 8, 3, 0, 0, tzinfo=jst)
+        at_06 = datetime(2026, 4, 8, 6, 0, 0, tzinfo=jst)
+        at_12 = datetime(2026, 4, 8, 12, 0, 0, tzinfo=jst)
+
+        assert get_allostatic_set_point("miss_companion", at_23) == pytest.approx(base_sp - 0.15)
+        assert get_allostatic_set_point("miss_companion", at_03) == pytest.approx(base_sp - 0.15)
+        assert get_allostatic_set_point("miss_companion", at_06) == pytest.approx(base_sp - 0.05)
+        assert get_allostatic_set_point("miss_companion", at_12) == pytest.approx(base_sp)
+
+    def test_hour_in_band_helper(self):
+        from desire_updater import hour_in_band
+
+        assert hour_in_band(3, 0, 5)
+        assert not hour_in_band(5, 0, 5)
+        assert hour_in_band(23, 22, 5)
+        assert hour_in_band(4, 22, 5)
+        assert not hour_in_band(12, 22, 5)
+        assert not hour_in_band(3, 3, 3)
 
 
 # ──────────────────────────────────────────────

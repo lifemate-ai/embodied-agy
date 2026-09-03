@@ -73,7 +73,7 @@ def migrate(config: MemoryConfig) -> None:
         name=config.collection_name,
         embedding_function=ef,
         metadata={
-            "description": "Claude's long-term memories",
+            "description": "The agent's long-term memories",
             "embedding_model": config.embedding_model,
         },
     )

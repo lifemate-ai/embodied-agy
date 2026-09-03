@@ -8,14 +8,14 @@
         "kind": "human_utterance",
         "person_id": "kouta",
         "confidence": 0.99,
-        "payload": {"text": "Write a detailed Claude Code spec in English."}
+        "payload": {"text": "Write a detailed Antigravity CLI spec in English."}
       }
     ]
   },
   "input": {
     "person_id": "kouta",
     "channel": "chat",
-    "user_text": "Write a detailed Claude Code spec in English."
+    "user_text": "Write a detailed Antigravity CLI spec in English."
   },
   "expected": [
     {

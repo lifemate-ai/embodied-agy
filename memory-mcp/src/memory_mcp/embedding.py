@@ -1,6 +1,6 @@
 """カスタム埋め込み関数モジュール。
 
-intfloat/multilingual-e5-base の SentenceTransformer ラッパー。
+intfloat/multilingual-e5 系（既定は -small）の SentenceTransformer ラッパー。
 e5 モデルはクエリと文書で異なるプレフィックスが必要。
 """
 
@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 
 class E5EmbeddingFunction:
-    """intfloat/multilingual-e5-base 用埋め込み関数。
+    """intfloat/multilingual-e5 系用の埋め込み関数（既定は -small）。
 
     e5 モデルの仕様:
     - 文書（passage）保存時: "passage: {text}" としてエンコード
@@ -23,12 +23,12 @@ class E5EmbeddingFunction:
         model_name: SentenceTransformer モデル名
     """
 
-    def __init__(self, model_name: str = "intfloat/multilingual-e5-base") -> None:
+    def __init__(self, model_name: str = "intfloat/multilingual-e5-small") -> None:
         self._model_name = model_name
         self._model: Any = None  # lazy load; actual type is SentenceTransformer
 
-    def _load_model(self) -> None:
-        """モデルを遅延ロード。"""
+    def warmup(self) -> None:
+        """Load the embedding stack and model synchronously once."""
         if self._model is None:
             try:
                 from sentence_transformers import SentenceTransformer
@@ -40,6 +40,10 @@ class E5EmbeddingFunction:
                     "sentence-transformers が必要です。"
                     "`uv add sentence-transformers` を実行してください。"
                 ) from e
+
+    def _load_model(self) -> None:
+        """モデルを遅延ロード。"""
+        self.warmup()
 
     def __call__(self, input: list[str]) -> list[list[float]]:
         """文書保存用埋め込み（passage: プレフィックス）。

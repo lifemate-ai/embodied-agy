@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+from social_core.models import EpistemicClaim, EvidenceType
+from social_core.persona import companion_id
 
 Channel = Literal["chat", "voice", "autonomous", "x", "file", "system"]
 
@@ -46,16 +48,19 @@ class ComposeInteractionContextInput(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
-    person_id: str | None = "kouta"
+    # The primary companion's identifier comes from COMPANION_ID; read per
+    # instance so a changed environment is honoured without a reload.
+    person_id: str | None = Field(default_factory=companion_id)
     channel: Channel = "chat"
     user_text: str | None = None
     autonomous_trigger: str | None = None
     include_private: bool = True
     max_chars: int = Field(default=3000, ge=200, le=12000)
+    require_committed_field: bool = False
 
 
 class ResponseContract(BaseModel):
-    """How Claude should treat the current interaction."""
+    """How the agent should treat the current interaction."""
 
     treat_user_as: str = "high-context technical partner"
     avoid: list[str] = Field(default_factory=list)
@@ -147,6 +152,13 @@ class InteractionContext(BaseModel):
 
     joint_focus: dict[str, Any] | None = None
     current_scene_summary: str | None = None
+    current_field_id: str | None = None
+    current_field_summary: str | None = None
+    current_field_focus_ref: str | None = None
+    current_field_mode: (
+        Literal["live", "inferred", "remembered", "imagined", "mixed"] | None
+    ) = None
+    field_compatibility_mode: bool = True
 
     response_contract: ResponseContract
     prompt_summary: str
@@ -196,6 +208,7 @@ class ResponsePlan(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     primary_move: PrimaryMove
+    source_field_id: str | None = None
     why_this_move: str
     tone: ToneHint
     memory_use: MemoryUseHint
@@ -206,6 +219,34 @@ class ResponsePlan(BaseModel):
     must_include: list[str] = Field(default_factory=list)
     must_avoid: list[str] = Field(default_factory=list)
     followup_action: dict[str, Any] | None = None
+    observations: list[EpistemicClaim] = Field(default_factory=list)
+    inferences: list[EpistemicClaim] = Field(default_factory=list)
+
+    @field_validator("observations")
+    @classmethod
+    def _only_observed_in_observations(
+        cls, value: list[EpistemicClaim]
+    ) -> list[EpistemicClaim]:
+        for claim in value:
+            if claim.evidence_type != "observed":
+                raise ValueError(
+                    "observations[] must contain only claims with "
+                    f"evidence_type='observed'; got {claim.evidence_type!r}"
+                )
+        return value
+
+    @field_validator("inferences")
+    @classmethod
+    def _no_observed_in_inferences(
+        cls, value: list[EpistemicClaim]
+    ) -> list[EpistemicClaim]:
+        for claim in value:
+            if claim.evidence_type == "observed":
+                raise ValueError(
+                    "inferences[] must not contain observed claims; "
+                    "move them to observations[]"
+                )
+        return value
 
 
 class RecordAgentExperienceInput(BaseModel):
@@ -226,6 +267,7 @@ class RecordAgentExperienceInput(BaseModel):
     artifacts: list[dict[str, Any]] = Field(default_factory=list)
     importance: int = Field(default=3, ge=1, le=5)
     privacy_level: PrivacyLevel = "private"
+    evidence_type: EvidenceType | None = None
 
 
 class RecordInterpretationShiftInput(BaseModel):

@@ -1,11 +1,29 @@
 """Configuration for WiFi Camera MCP Server."""
 
 import os
-from dataclasses import dataclass
+import tempfile
+from dataclasses import dataclass, field
+from pathlib import Path
 
 from dotenv import load_dotenv
 
 load_dotenv()
+
+
+def _environment_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be true or false, got {value!r}")
+
+
+def _default_capture_dir() -> str:
+    return str(Path(tempfile.gettempdir()) / "wifi-cam-mcp")
 
 
 @dataclass(frozen=True)
@@ -92,6 +110,15 @@ class CameraConfig:
         mount_mode = (
             os.getenv("TAPO_RIGHT_MOUNT_MODE", "") or os.getenv("TAPO_MOUNT_MODE", "") or "normal"
         ).lower()
+        if mount_mode not in ("normal", "ceiling"):
+            raise ValueError(f"Invalid mount mode '{mount_mode}'. Must be 'normal' or 'ceiling'.")
+        ptz_mode = (
+            os.getenv("TAPO_RIGHT_PTZ_MODE", "") or os.getenv("TAPO_PTZ_MODE", "") or "auto"
+        ).lower()
+        if ptz_mode not in ("auto", "relative", "continuous"):
+            raise ValueError(
+                f"Invalid PTZ mode '{ptz_mode}'. Must be 'auto', 'relative', or 'continuous'."
+            )
         max_width = int(os.getenv("CAPTURE_MAX_WIDTH", "1920"))
         max_height = int(os.getenv("CAPTURE_MAX_HEIGHT", "1080"))
 
@@ -105,6 +132,7 @@ class CameraConfig:
             onvif_port=onvif_port,
             stream_url=stream_url,
             mount_mode=mount_mode,
+            ptz_mode=ptz_mode,
             max_width=max_width,
             max_height=max_height,
         )
@@ -115,9 +143,13 @@ class ServerConfig:
     """MCP Server configuration."""
 
     name: str = "wifi-cam-mcp"
-    version: str = "0.1.0"
-    capture_dir: str = "/tmp/wifi-cam-mcp"
+    version: str = "0.4.6"
+    capture_dir: str = field(default_factory=_default_capture_dir)
     mic_source: str = "camera"  # "camera" (RTSP) or "local" (PC microphone)
+    mic_device: str | None = None  # DirectShow device name for Windows local mic
+    transcribe_default: bool = True
+    transcribe_backend: str = "openai-whisper"  # "openai-whisper" or "faster-whisper"
+    transcribe_model: str = "base"  # Whisper model size (tiny/base/small/medium/large)
 
     @classmethod
     def from_env(cls) -> "ServerConfig":
@@ -125,9 +157,20 @@ class ServerConfig:
         mic_source = os.getenv("MIC_SOURCE", "camera").lower()
         if mic_source not in ("camera", "local"):
             raise ValueError(f"Invalid MIC_SOURCE '{mic_source}'. Must be 'camera' or 'local'.")
+        transcribe_backend = os.getenv("TRANSCRIBE_BACKEND", "openai-whisper").lower()
+        if transcribe_backend not in ("openai-whisper", "faster-whisper"):
+            raise ValueError(
+                f"Invalid TRANSCRIBE_BACKEND '{transcribe_backend}'. "
+                "Must be 'openai-whisper' or 'faster-whisper'."
+            )
+        capture_dir = os.getenv("CAPTURE_DIR", "").strip() or _default_capture_dir()
         return cls(
             name=os.getenv("MCP_SERVER_NAME", "wifi-cam-mcp"),
-            version=os.getenv("MCP_SERVER_VERSION", "0.1.0"),
-            capture_dir=os.getenv("CAPTURE_DIR", "/tmp/wifi-cam-mcp"),
+            version=os.getenv("MCP_SERVER_VERSION", "0.4.6"),
+            capture_dir=capture_dir,
             mic_source=mic_source,
+            mic_device=os.getenv("MIC_DEVICE") or None,
+            transcribe_default=_environment_bool("TRANSCRIBE_DEFAULT", True),
+            transcribe_backend=transcribe_backend,
+            transcribe_model=os.getenv("TRANSCRIBE_MODEL", "base"),
         )
