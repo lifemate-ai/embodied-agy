@@ -1,5 +1,5 @@
 #!/bin/bash
-# agy 自律行動スクリプト（macOS版）
+# Antigravity CLI (agy) 自律行動スクリプト（macOS版）
 # 20分ごとにcronで実行、時間帯に応じて間引く
 #
 # crontab -e で以下を追加:
@@ -11,9 +11,16 @@
 #   autonomous-action.sh --date "2026-02-20 14:30"          # 日時を注入（スケジュール制御テスト）
 #   autonomous-action.sh --force-routine                    # ルーチン回を強制
 #   autonomous-action.sh --force-normal                     # 通常回を強制
-#   autonomous-action.sh --dry-run                          # プロンプトを表示
-#   autonomous-action.sh -p "任意のプロンプト"              # プロンプト直接指定（スケジュール制御スキップ）
+#   autonomous-action.sh --dry-run                          # agy -p を実行せずプロンプトを表示
+#   autonomous-action.sh -p "任意のプロンプト"                  # プロンプト直接指定（スケジュール制御スキップ）
 #   autonomous-action.sh --dry-run --date "2026-02-20 03:00" --force-routine  # 組み合わせ可
+#
+# Claude Code 版との違いは docs/antigravity.md にまとめてある。要点:
+#   - claude -p（stdin からプロンプト） → agy -p "$PROMPT"（agy の -p はプロンプトを値に取る。
+#     stdin から流すと次のフラグがプロンプトとして解釈される）
+#   - --resume ID → --conversation ID（ID は出力 JSON の .conversation_id、返答は .response）
+#   - 許可ツール一覧や MCP 設定ファイルを渡すフラグは無い。--add-dir "$SCRIPT_DIR" で
+#     ワークスペースを付けると .agents/hooks.json と .agents/mcp_config.json が読み込まれる
 
 # NOTE: Set HOME and PATH for your environment
 export HOME="${HOME:-$(/usr/bin/dscl . -read /Users/$(whoami) NFSHomeDirectory | awk '{print $2}')}"
@@ -303,20 +310,54 @@ fi
 
 MORNING_SECTION=""
 if [ "$IS_FIRST_SESSION_TODAY" = true ]; then
+  # consciousness-mcp / kernel-mcp の sleep_consolidate が
+  # quiet hours 中に morning_briefing.json を書く（Phase 2.1）。
+  # 存在すれば summary_line を1行プリペンドし、無ければ従来通り。
+  MORNING_BRIEFING_PATH="${MORNING_BRIEFING_PATH:-$HOME/.gemini/morning_briefing.json}"
+  BRIEFING_LINE=""
+  if [ -f "$MORNING_BRIEFING_PATH" ]; then
+    if command -v jq >/dev/null 2>&1; then
+      BRIEFING_LINE=$(jq -r '.summary_line // ""' "$MORNING_BRIEFING_PATH" 2>/dev/null)
+    else
+      BRIEFING_LINE=$(grep '"summary_line"' "$MORNING_BRIEFING_PATH" 2>/dev/null | head -1 | sed -E 's/.*"summary_line"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/')
+    fi
+  fi
+
   MORNING_TEXT="${MORNING_PROMPT:-今日の最初の自律行動だ。朝の再構成として以下を実施せよ：
 1. recall(context=\"直近の重要な決定・未完了タスク\") を呼び出す
 2. 前日の行動を確認し、今日やりたいことを考えよ}"
+
+  BRIEFING_SECTION=""
+  if [ -n "$BRIEFING_LINE" ]; then
+    BRIEFING_SECTION="${BRIEFING_LINE}
+"
+  fi
+
   MORNING_SECTION="
 ## 今日初めてのHeartbeat
-${MORNING_TEXT}
+${BRIEFING_SECTION}${MORNING_TEXT}
 "
 fi
 
-# NOTE: @FILE は agyの Context Mention 機能でファイル内容をプロンプトに展開する。
+# NOTE: @FILE は Antigravity CLI の Context Mention 機能でファイル内容をプロンプトに展開する
+# （Claude Code と同じ書き方がそのまま通る）。
 # SOUL.md — エージェントの人格・価値観を定義するファイル（自分で作成する）
 # TODO.md — やりたいこと・タスクを管理するファイル（自分で作成する）
 # ROUTINES.md — 定期実行するルーチンを定義するファイル（任意）
 # これらが存在しない場合は GEMINI.md のみで動作する。
+# 雛形は examples/SOUL.sample.md などに、説明は docs/autonomous-files.md にある。
+#
+# 存在しないファイルへの @ 参照は、エラーも出さずにただ解決されない。
+# Heartbeat は完走し、ログにも何も残らないので、ここで名指しで警告しておく（#140）。
+# 中断はしない。無い状態でも GEMINI.md だけで動く、という今までの挙動はそのまま。
+for PROMPT_FILE in SOUL.md TODO.md ROUTINES.md; do
+  if [ ! -f "$SCRIPT_DIR/$PROMPT_FILE" ]; then
+    PROMPT_FILE_WARNING="WARN: $PROMPT_FILE not found in $SCRIPT_DIR; the @$PROMPT_FILE reference in the prompt will not resolve (see docs/autonomous-files.md)"
+    echo "$PROMPT_FILE_WARNING" >> "$LOG_FILE"
+    echo "$PROMPT_FILE_WARNING" >&2
+  fi
+done
+
 PROMPT="自律行動タイム（Heartbeat）
 
 @SOUL.md
@@ -328,47 +369,36 @@ ${MORNING_SECTION}${ROUTINE_MODE}
 ${DESIRE_SECTION}
 ## 補足ルール
 - ${TIME_RULE}
-- 人に話しかける、say する、軽く促す前に `get_social_state` → `evaluate_action(action_type=\"say\" または \"nudge_human\")` を通し、許可されないなら黙るか後回しにする
-- X に投稿する前に `get_social_state` → `get_person_model` → `review_social_post` → `evaluate_action(action_type=\"post_tweet\")` を通す
-- 人の発話・依頼・境界・約束を拾ったら `ingest_social_event` と `ingest_interaction` を使って social DB に反映する。明確な境界は `record_boundary`、約束は `create_commitment` を使う
-- 物や人の位置関係をある程度構造化できるときは `ingest_scene_parse` を使う。参照が曖昧なときは `resolve_reference` や `get_current_joint_focus` を使う
-- 一日の節目や余力があるタイミングでは `append_daybook` を使って自己要約を更新する
+- 人に話しかける、say する、軽く促す前に \`get_social_state\` → \`evaluate_action(action_type=\"say\" または \"nudge_human\")\` を通し、許可されないなら黙るか後回しにする
+- X に投稿する前に \`get_social_state\` → \`get_person_model\` → \`review_social_post\` → \`evaluate_action(action_type=\"post_tweet\")\` を通す
+- 人の発話・依頼・境界・約束を拾ったら \`ingest_social_event\` と \`ingest_interaction\` を使って social DB に反映する。明確な境界は \`record_boundary\`、約束は \`create_commitment\` を使う
+- 物や人の位置関係をある程度構造化できるときは \`ingest_scene_parse\` を使う。参照が曖昧なときは \`resolve_reference\` や \`get_current_joint_focus\` を使う
+- 一日の節目や余力があるタイミングでは \`append_daybook\` を使って自己要約を更新する
 - 人がいないことはよくある。一日のうち人がいるのは2時間程度やそれ以下の場合も少なくない
 - 部屋を見るときは see で撮って、予測→観察→記憶照合→保存のサイクルで発見を拾え。朝日や天気の変化、部屋の明るさなど、人がいなくても観察すべきものはある
 - 読書を選択した場合は、ゆっくり読んで、感想をしっかり書き残す。感想は長くなっても良い。読書を味わうこと。読書を味わうとは、予想して、伏線に注目して、感じたことを大切にする。
-- MCPが動作していなければ、デバッグのために関係があると思われる要素をallowedToolsの範囲で調査せよ
+- MCPが動作していなければ、デバッグのために関係があると思われる要素を、許可されているツールの範囲で調査せよ
 - 行動の最後に必ず心残りチェックをせよ。確認項目：(1)やったことを記憶や記録（diary/TODO.md/notes/等）に残したか (2)続きをやりたいことはないか。残すべきものがあるなら [CONTINUE: 記憶に残す] 、続きがあるなら [CONTINUE: 具体的な理由] 、すべて完了なら [DONE] を出力末尾に書くこと。書き忘れると次のターンに引き継げない。チェインは最大3回まで。上限に達したら TODO.md の「前回の続き」セクションに書いて次のHeartbeatに引き継げ
 ${INTEROCEPTION_SECTION}"
 
 cd "$SCRIPT_DIR"
 
-# --- allowedTools (.gemini/settings*.json から動的生成) ---
-SETTINGS_FILES=()
-for SETTINGS_FILE in \
-  "$SCRIPT_DIR/.gemini/settings.local.json" \
-  "$SCRIPT_DIR/.gemini/settings.json"
-do
-  if [ -f "$SETTINGS_FILE" ]; then
-    SETTINGS_FILES+=("$SETTINGS_FILE")
-  fi
-done
-
-if [ "${#SETTINGS_FILES[@]}" -eq 0 ]; then
-  echo "ERROR: no .gemini/settings*.json found" >> "$LOG_FILE"
-  exit 1
-fi
-
-ALLOWED_TOOLS=$(jq -rs '
-  map(.permissions.allow // [])
-  | add
-  | unique
-  | join(",")
-' "${SETTINGS_FILES[@]}")
-
-ALLOWED_TOOL_ARGS=()
-if [ -n "$ALLOWED_TOOLS" ] && [ "$ALLOWED_TOOLS" != "null" ]; then
-  ALLOWED_TOOL_ARGS=(--allowedTools "$ALLOWED_TOOLS")
-fi
+# --- agy の共通引数 ---
+# Claude Code 版はここで settings から許可ツールの一覧を組み立て、別ファイルの MCP 設定を
+# フラグで渡していた。agy にはどちらも無い（docs/antigravity.md）:
+#   - 許可: --dangerously-skip-permissions で全ツールを承認する。意図（propose_field_action）の
+#     無い外向き行為は .agents/hooks.json の PreToolUse ゲート（efpf-agy-hook）が拒否する
+#   - MCP と hooks: --add-dir "$SCRIPT_DIR" でワークスペースを付けると、.agents/mcp_config.json と
+#     .agents/hooks.json が print mode でも読み込まれる（trustedWorkspaces に無くてもよい）。
+#     agy -p はカレントディレクトリを自動では付けない。--add-dir を落とすと hooks も MCP も
+#     載らないまま正常終了したように見える（ログにも何も出ない）ので、ここは必ず渡す
+#   - --print-timeout: agy 自身の待ち時間（既定 5m）。外側の timeout 20m は最後の砦
+AGY_ARGS=(
+  --add-dir "$SCRIPT_DIR"
+  --dangerously-skip-permissions
+  --output-format json
+  --print-timeout 20m
+)
 
 # テストモードならプロンプトを差し替え
 if [ -n "$TEST_PROMPT_STRING" ]; then
@@ -388,109 +418,102 @@ if [ "$DRY_RUN" = true ]; then
   echo "--- PROMPT ---" >> "$LOG_FILE"
   echo "$PROMPT" >> "$LOG_FILE"
   echo "" >> "$LOG_FILE"
-  echo "--- ALLOWED_TOOLS ---" >> "$LOG_FILE"
-  if [ -n "$ALLOWED_TOOLS" ] && [ "$ALLOWED_TOOLS" != "null" ]; then
-    echo "$ALLOWED_TOOLS" | tr ',' '\n' >> "$LOG_FILE"
+  echo "--- AGY_ARGS ---" >> "$LOG_FILE"
+  echo "agy -p \"\$PROMPT\" ${AGY_ARGS[*]}" >> "$LOG_FILE"
+  if [ -f "$SCRIPT_DIR/heartbeat-session-id" ]; then
+    echo "  --conversation $(cat "$SCRIPT_DIR/heartbeat-session-id")  (resume)" >> "$LOG_FILE"
   else
-    echo "(not set; agy defaults will be used)" >> "$LOG_FILE"
+    echo "  (heartbeat-session-id なし: 新規会話)" >> "$LOG_FILE"
   fi
   # 標準出力にも出す
   cat "$LOG_FILE"
 else
+  # PreInvocation フック（efpf-agy-hook pre-invocation）は環境変数を継承するので、
+  # HEARTBEAT=1 を見て EFPF の begin/competition/commit を回してからプロンプトが
+  # モデルに渡る。以後の外向きツールは PreToolUse の意図ゲートが検査する。
   export HEARTBEAT=1
   SESSION_FILE="$SCRIPT_DIR/heartbeat-session-id"
+  AGY_STDERR=$(mktemp)
+  trap 'rm -f "$AGY_STDERR"' EXIT
 
-  run_new_session() {
-    echo "[新規セッション作成]" >> "$LOG_FILE"
+  # agy -p を1回実行する。引数は --conversation などの追加フラグ。
+  # stdout（JSON）を RESULT に、stderr を $AGY_STDERR に分けて受ける。会話が見つからない
+  # ときの warning は stderr に出て JSON 自体は正常なので、混ぜると jq が壊れる。
+  run_agy() {
     if [ -n "$TIMEOUT_CMD" ]; then
-      RESULT_JSON=$(echo "$PROMPT" | "$TIMEOUT_CMD" 20m agy -p \
-        --output-format json \
-        "${ALLOWED_TOOL_ARGS[@]}" 2>&1)
+      RESULT=$("$TIMEOUT_CMD" 20m agy -p "$PROMPT" "${AGY_ARGS[@]}" "$@" 2>"$AGY_STDERR")
       AGY_EXIT=$?
     else
-      RESULT_JSON=$(echo "$PROMPT" | agy -p \
-        --output-format json \
-        "${ALLOWED_TOOL_ARGS[@]}" 2>&1)
+      RESULT=$(agy -p "$PROMPT" "${AGY_ARGS[@]}" "$@" 2>"$AGY_STDERR")
       AGY_EXIT=$?
     fi
+    if [ -s "$AGY_STDERR" ]; then
+      echo "[agy stderr] $(cat "$AGY_STDERR")" >> "$LOG_FILE"
+    fi
+  }
+
+  # 出力 JSON を読んでログに残し、会話IDを次回の --conversation 用に保存する。
+  # 戻り値 0=SUCCESS、1=それ以外（非JSON、ERROR/CANCELED/INTERRUPTED、timeout）
+  record_result() {
+    local label="$1"   # "new session" or "resume"
     if [ "$AGY_EXIT" -eq 124 ]; then
-      echo "[$(date +%Y-%m-%d_%H:%M:%S)] TIMEOUT: Normal mode agy (new session) exceeded 20min" >> "$LOG_FILE"
+      echo "[$(date +%Y-%m-%d_%H:%M:%S)] TIMEOUT: Normal mode agy ($label) exceeded 20min" >> "$LOG_FILE"
     fi
 
-    NEW_SESSION_ID=$(echo "$RESULT_JSON" | jq -r '.session_id // empty')
+    if ! echo "$RESULT" | jq empty 2>/dev/null; then
+      # JSONでない（timeout で途中終了、認証要求などの生の文字列）
+      echo "[非JSON出力/exit=$AGY_EXIT] $RESULT" >> "$LOG_FILE"
+      return 1
+    fi
+
+    STATUS=$(echo "$RESULT" | jq -r '.status // "UNKNOWN"')
+    NEW_SESSION_ID=$(echo "$RESULT" | jq -r '.conversation_id // empty')
+    RESULT_TEXT=$(echo "$RESULT" | jq -r '.response // .error // .')
+    echo "[status] $STATUS (exit=$AGY_EXIT)" >> "$LOG_FILE"
+
+    if [ "$STATUS" != "SUCCESS" ]; then
+      echo "[agyエラー/$STATUS] $(echo "$RESULT" | jq -r '.error // empty')" >> "$LOG_FILE"
+      echo "$RESULT_TEXT" >> "$LOG_FILE"
+      return 1
+    fi
+
     if [ -n "$NEW_SESSION_ID" ]; then
-      # -p オプション（一時的なプロンプト）の場合はセッションIDを上書きしない
+      # -p オプション（一時的なプロンプト）の場合は会話IDを上書きしない
       if [ -z "$TEST_PROMPT_STRING" ]; then
         echo "$NEW_SESSION_ID" > "$SESSION_FILE"
       else
-        echo "[一時プロンプト] セッションID上書きスキップ" >> "$LOG_FILE"
+        echo "[一時プロンプト] 会話ID上書きスキップ" >> "$LOG_FILE"
       fi
-      echo "[session_id] $NEW_SESSION_ID" >> "$LOG_FILE"
+      echo "[conversation_id] $NEW_SESSION_ID" >> "$LOG_FILE"
     fi
 
-    echo "$RESULT_JSON" | jq -r '.result // .' >> "$LOG_FILE"
+    echo "$RESULT_TEXT" >> "$LOG_FILE"
+    return 0
   }
 
   if [ -f "$SESSION_FILE" ]; then
     SESSION_ID=$(cat "$SESSION_FILE")
-    echo "[resume] session_id=$SESSION_ID" >> "$LOG_FILE"
+    echo "[resume] conversation_id=$SESSION_ID" >> "$LOG_FILE"
+    run_agy --conversation "$SESSION_ID"
 
-    if [ -n "$TIMEOUT_CMD" ]; then
-      RESULT=$(echo "$PROMPT" | "$TIMEOUT_CMD" 20m agy -p \
-        --resume "$SESSION_ID" \
-        --output-format json \
-        "${ALLOWED_TOOL_ARGS[@]}" 2>&1)
-      AGY_EXIT=$?
-    else
-      RESULT=$(echo "$PROMPT" | agy -p \
-        --resume "$SESSION_ID" \
-        --output-format json \
-        "${ALLOWED_TOOL_ARGS[@]}" 2>&1)
-      AGY_EXIT=$?
+    # agy は会話が見つからないと stderr に warning を出し、新しい会話でそのまま実行する
+    # （exit 0、status SUCCESS、.conversation_id は新しい会話のもの）。Claude Code の
+    # 「No conversation found → 新規セッションで再実行」に相当するが、再実行は要らない。
+    # record_result が新しい ID を保存するので、次回からはそちらを resume する。
+    if grep -qi 'conversation .*not found' "$AGY_STDERR"; then
+      echo "[resume失敗/会話消失] $SESSION_ID → 新規会話で実行済み" >> "$LOG_FILE"
     fi
-    if [ "$AGY_EXIT" -eq 124 ]; then
-      echo "[$(date +%Y-%m-%d_%H:%M:%S)] TIMEOUT: Normal mode agy (resume) exceeded 20min" >> "$LOG_FILE"
-    fi
-
-    if echo "$RESULT" | jq empty 2>/dev/null; then
-      # 有効なJSON
-      IS_ERROR=$(echo "$RESULT" | jq -r '.is_error // false')
-      RESULT_TEXT=$(echo "$RESULT" | jq -r '.result // .')
-
-      if [ "$IS_ERROR" = "true" ] || echo "$RESULT_TEXT" | grep -qi "Nested sessions\|Cannot be launched inside"; then
-        echo "[resume失敗/環境エラー] $RESULT_TEXT" >> "$LOG_FILE"
-        echo "=== 自律行動終了: $(date) ===" >> "$LOG_FILE"
-        exit 1
-      elif echo "$RESULT_TEXT" | grep -qi "No conversation found"; then
-        echo "[resume失敗/セッション消失] $RESULT_TEXT" >> "$LOG_FILE"
-        rm -f "$SESSION_FILE"
-        run_new_session
-      else
-        NEW_SESSION_ID=$(echo "$RESULT" | jq -r '.session_id // empty')
-        if [ -n "$NEW_SESSION_ID" ]; then
-          if [ -z "$TEST_PROMPT_STRING" ]; then
-            echo "$NEW_SESSION_ID" > "$SESSION_FILE"
-          fi
-          echo "[session_id] $NEW_SESSION_ID" >> "$LOG_FILE"
-        fi
-        echo "$RESULT_TEXT" >> "$LOG_FILE"
-      fi
-    else
-      # JSONでない（生のエラー文字列）
-      if echo "$RESULT" | grep -qi "Nested sessions\|Cannot be launched inside"; then
-        echo "[resume失敗/環境エラー] $RESULT" >> "$LOG_FILE"
-        echo "=== 自律行動終了: $(date) ===" >> "$LOG_FILE"
-        exit 1
-      elif echo "$RESULT" | grep -qi "No conversation found"; then
-        echo "[resume失敗/セッション消失] $RESULT" >> "$LOG_FILE"
-        rm -f "$SESSION_FILE"
-        run_new_session
-      else
-        echo "$RESULT" >> "$LOG_FILE"
-      fi
+    if ! record_result resume; then
+      echo "=== 自律行動終了: $(date) ===" >> "$LOG_FILE"
+      exit 1
     fi
   else
-    run_new_session
+    echo "[新規会話作成]" >> "$LOG_FILE"
+    run_agy
+    if ! record_result "new session"; then
+      echo "=== 自律行動終了: $(date) ===" >> "$LOG_FILE"
+      exit 1
+    fi
   fi
 fi
 

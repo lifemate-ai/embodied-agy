@@ -34,7 +34,7 @@ embedding 距離は：
 
 ### モデル
 
-memory-mcp の `E5EmbeddingFunction`（`intfloat/multilingual-e5-base` を default に、env で `intfloat/multilingual-e5-small` に切替可能）を流用する。追加依存ゼロ、追加 download なし（memory-mcp 初回ロード時にダウンロード済み）。
+memory-mcp の `E5EmbeddingFunction`（`intfloat/multilingual-e5-small` を default に、env で `intfloat/multilingual-e5-base` に切替可能）を流用する。追加依存ゼロ、追加 download なし（memory-mcp 初回ロード時にダウンロード済み）。
 
 ### スコアリング
 

@@ -33,15 +33,15 @@
     </filter>
   </defs>
 
-  <!-- Claude Code (top center) -->
+  <!-- Antigravity CLI (top center) -->
   <rect x="330" y="10" width="300" height="60" rx="12" fill="url(#brain)" filter="url(#shadow)"/>
-  <text x="480" y="36" text-anchor="middle" fill="white" font-size="16" font-weight="bold">Claude Code</text>
+  <text x="480" y="36" text-anchor="middle" fill="white" font-size="16" font-weight="bold">Antigravity CLI</text>
   <text x="480" y="56" text-anchor="middle" fill="rgba(255,255,255,0.85)" font-size="12">MCP Client / AI Brain</text>
 
   <!-- MCP Protocol label -->
   <text x="480" y="90" text-anchor="middle" fill="#6b7280" font-size="11">MCP Protocol (stdio)</text>
 
-  <!-- Main vertical line from Claude Code -->
+  <!-- Main vertical line from Antigravity CLI -->
   <line x1="480" y1="70" x2="480" y2="100" stroke="#9ca3af" stroke-width="1.5"/>
 
   <!-- Split into two branches -->

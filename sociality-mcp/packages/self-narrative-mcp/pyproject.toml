@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "self-narrative-mcp"
-version = "0.1.0"
+version = "0.4.6"
 description = "MCP server for compact autobiographical summaries and arcs"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -26,9 +26,6 @@ self-narrative-mcp = "self_narrative_mcp.server:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/self_narrative_mcp"]
-
-[tool.uv.sources]
-social-core = { path = "../social-core" }
 
 [tool.ruff]
 line-length = 100

@@ -6,7 +6,7 @@
 # Usage:
 #   ./test-autonomous.sh                          # 通常Heartbeatをcron環境で実行
 #   ./test-autonomous.sh --check-tools            # 全MCP/スキルの動作チェック
-#   ./test-autonomous.sh --dry-run                # プロンプト確認（agy実行なし）
+#   ./test-autonomous.sh --dry-run                # プロンプト確認（agy 実行なし）
 #   ./test-autonomous.sh --dry-run --date "2026-02-20 03:00"   # 深夜帯のスケジュール確認
 #   ./test-autonomous.sh --dry-run --date "2026-02-20 14:30"   # 昼間帯のスケジュール確認
 #   ./test-autonomous.sh --dry-run --force-routine             # ルーチン回を強制確認
@@ -38,50 +38,52 @@ done
 
 if [ "$CHECK_TOOLS" = true ]; then
   # --check-tools: 全MCP/スキルの動作チェック用プロンプトを生成
-  # autonomous-action.sh の allowedTools に含まれる全ツールを順番に試す
+  # autonomous-action.sh が --add-dir で載せるワークスペースの MCP と、agy の組み込みツールを順番に試す
+  # （agy に allowedTools は無い。許可は --dangerously-skip-permissions、拒否は PreToolUse の意図ゲート）
   PROMPT_FILE="$RESULT_DIR/debug_prompt_${TIMESTAMP}.txt"
   cat > "$PROMPT_FILE" <<'PROMPT'
-allowedTools の動作チェック。以下のツールを順番に1つずつ試して、結果をレポートせよ。
+ツールの動作チェック。以下のツールを順番に1つずつ試して、結果をレポートせよ。
 各ツールについて「OK」「NG（エラー内容）」「スキップ（理由）」を記録すること。
 
 ## チェックリスト
 
-### ファイル操作
+### ファイル操作（agy 組み込みツール）
 # NOTE: ~/yourproject/ はサンプルパス。実際の環境に合わせて編集すること
-1. Read — ~/yourproject/SOUL.md を読む
-2. Write — ~/yourproject/test_write_check.txt に「write OK」と書く
-3. Edit — ~/yourproject/test_write_check.txt の内容を「edit OK」に変更
-4. Glob — ~/yourproject/*.md を検索
+1. view_file — ~/yourproject/SOUL.md を読む
+2. write_to_file — ~/yourproject/test_write_check.txt に「write OK」と書く
+3. replace_file_content — ~/yourproject/test_write_check.txt の内容を「edit OK」に変更
+4. find_by_name — ~/yourproject/*.md を検索
 
+# MCP は call_mcp_tool(ServerName, ToolName) で呼ぶ。以下は「サーバー名 / ツール名」
 ### MCP: wifi-cam
-5. mcp__wifi-cam__see — カメラで1枚撮影
-6. mcp__wifi-cam__look_left — 左を向く（10度）
-7. mcp__wifi-cam__listen — 2秒間録音（文字起こし含む）
-8. mcp__wifi-cam__camera_info — カメラ情報取得
+5. wifi-cam / see — カメラで1枚撮影
+6. wifi-cam / look_left — 左を向く（10度）
+7. wifi-cam / listen — 2秒間録音（文字起こし含む）
+8. wifi-cam / camera_info — カメラ情報取得
 
 ### MCP: memory
-9. mcp__memory__get_memory_stats — 統計取得
-10. mcp__memory__recall_divergent — 「動作テスト」で検索
-11. mcp__memory__get_working_memory — ワーキングメモリ取得
+9. memory / get_memory_stats — 統計取得
+10. memory / recall_divergent — 「動作テスト」で検索
+11. memory / get_working_memory — ワーキングメモリ取得
 
 ### MCP: tts
-12. mcp__tts__say — 「テスト完了」と発声（VOICEVOX）
+12. tts / say — 「テスト完了」と発声（VOICEVOX）
 
 ### MCP: system-temperature
-13. mcp__system-temperature__get_current_time — 現在時刻取得
+13. system-temperature / get_current_time — 現在時刻取得
 
 ### MCP: sociality
-14. mcp__sociality__get_social_state — 現在の social state を取得
-15. mcp__sociality__get_person_model — kouta の person model を取得
-16. mcp__sociality__get_current_joint_focus — joint focus を取得
-17. mcp__sociality__get_quiet_mode_state — quiet mode 状態を取得
-18. mcp__sociality__get_self_summary — 自己要約を取得
+14. sociality / get_social_state — 現在の social state を取得
+15. sociality / get_person_model — kouta の person model を取得
+16. sociality / get_current_joint_focus — joint focus を取得
+17. sociality / get_quiet_mode_state — quiet mode 状態を取得
+18. sociality / get_self_summary — 自己要約を取得
 
 ### スキル
-19. Skill(read) — /read https://example.com をテスト（--info のみ）
+19. /read — /read https://example.com をテスト（--info のみ）
 
-### Bash
-20. Bash(bun run) — bun --version を実行
+### コマンド実行
+20. run_command — bun --version を実行
 
 ## レポート形式
 
@@ -89,9 +91,9 @@ allowedTools の動作チェック。以下のツールを順番に1つずつ試
 
 ```
 === ツール動作チェック結果 ===
-1. Read:       OK/NG
-2. Write:      OK/NG
-3. Edit:       OK/NG
+1. view_file:            OK/NG
+2. write_to_file:        OK/NG
+3. replace_file_content: OK/NG
 ...
 === 合計: X/20 OK ===
 ```

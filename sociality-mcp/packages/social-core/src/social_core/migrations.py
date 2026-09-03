@@ -95,6 +95,573 @@ CREATE INDEX IF NOT EXISTS idx_private_letters_person_ts
 """
 
 
+_MIGRATION_006_SQL = """
+CREATE TABLE IF NOT EXISTS hor_records (
+    hor_id TEXT PRIMARY KEY,
+    ts TEXT NOT NULL,
+    owner_id TEXT NOT NULL,
+    target_kind TEXT NOT NULL,
+    target_ref TEXT,
+    asserted_mode TEXT NOT NULL,
+    asserted_content TEXT NOT NULL,
+    schema_snapshot_id TEXT,
+    source_tick_id TEXT,
+    confidence REAL NOT NULL DEFAULT 0.6,
+    source TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_hor_records_ts
+    ON hor_records(ts DESC, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_hor_records_owner
+    ON hor_records(owner_id, ts DESC);
+CREATE INDEX IF NOT EXISTS idx_hor_records_asserted_mode
+    ON hor_records(asserted_mode, ts DESC);
+CREATE INDEX IF NOT EXISTS idx_hor_records_target_kind
+    ON hor_records(target_kind, ts DESC);
+CREATE INDEX IF NOT EXISTS idx_hor_records_source_tick
+    ON hor_records(source_tick_id);
+"""
+
+
+_MIGRATION_005_SQL = """
+CREATE TABLE IF NOT EXISTS attention_schemas (
+    schema_id TEXT PRIMARY KEY,
+    ts TEXT NOT NULL,
+    owner_id TEXT NOT NULL,
+    focal_target_ref TEXT,
+    modality TEXT NOT NULL,
+    intensity REAL NOT NULL DEFAULT 0.0,
+    dwell_seconds REAL NOT NULL DEFAULT 0.0,
+    predicted_next_focus TEXT,
+    control_handle TEXT,
+    source_tick_id TEXT,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_attention_schemas_ts
+    ON attention_schemas(ts DESC, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_attention_schemas_owner
+    ON attention_schemas(owner_id, ts DESC);
+CREATE INDEX IF NOT EXISTS idx_attention_schemas_modality
+    ON attention_schemas(modality, ts DESC);
+"""
+
+
+_MIGRATION_004_SQL = """
+CREATE TABLE IF NOT EXISTS tick_frames (
+    tick_id TEXT PRIMARY KEY,
+    ts TEXT NOT NULL,
+    person_id TEXT,
+    ignited INTEGER NOT NULL DEFAULT 0,
+    conflicted INTEGER NOT NULL DEFAULT 0,
+    attention_target_ref TEXT,
+    dominant_desire TEXT,
+    winning_memory_ids_json TEXT NOT NULL DEFAULT '[]',
+    prediction_error_json TEXT NOT NULL DEFAULT '{}',
+    affect_summary TEXT,
+    chosen_action_ref TEXT,
+    reportability TEXT NOT NULL DEFAULT 'mentionable',
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_tick_frames_ts
+    ON tick_frames(ts DESC, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_tick_frames_reportability
+    ON tick_frames(reportability, ts DESC);
+CREATE INDEX IF NOT EXISTS idx_tick_frames_person
+    ON tick_frames(person_id, ts DESC);
+"""
+
+
+_MIGRATION_003_SQL = """
+CREATE TABLE IF NOT EXISTS counterfactuals (
+    counterfactual_id TEXT PRIMARY KEY,
+    tick_id TEXT,
+    ts TEXT NOT NULL,
+    person_id TEXT,
+    chosen_action_ref TEXT,
+    rejected_action TEXT NOT NULL,
+    rejected_action_payload_json TEXT NOT NULL DEFAULT '{}',
+    reason TEXT,
+    source TEXT NOT NULL,
+    expected_outcome TEXT,
+    evidence_type TEXT,
+    importance INTEGER NOT NULL DEFAULT 3,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_counterfactuals_ts
+    ON counterfactuals(ts DESC, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_counterfactuals_source
+    ON counterfactuals(source, ts DESC);
+CREATE INDEX IF NOT EXISTS idx_counterfactuals_tick
+    ON counterfactuals(tick_id);
+CREATE INDEX IF NOT EXISTS idx_counterfactuals_person
+    ON counterfactuals(person_id, ts DESC);
+"""
+
+
+_MIGRATION_007_SQL = """
+CREATE TABLE IF NOT EXISTS workspace_candidates (
+    candidate_id TEXT PRIMARY KEY,
+    tick_id TEXT NOT NULL REFERENCES tick_frames(tick_id) ON DELETE CASCADE,
+    kind TEXT NOT NULL,
+    content_ref TEXT NOT NULL,
+    content_summary TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL,
+    source_mode TEXT NOT NULL,
+    modality TEXT NOT NULL,
+    precision REAL NOT NULL,
+    prediction_error REAL NOT NULL,
+    need_relevance REAL NOT NULL,
+    goal_relevance REAL NOT NULL,
+    expected_information_gain REAL NOT NULL,
+    continuity_with_previous REAL NOT NULL,
+    controllability REAL NOT NULL,
+    social_relevance REAL NOT NULL,
+    conflict_penalty REAL NOT NULL,
+    switching_cost REAL NOT NULL,
+    score REAL NOT NULL,
+    reportability TEXT NOT NULL,
+    rank INTEGER,
+    selected INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_workspace_candidates_tick
+    ON workspace_candidates(tick_id, rank, score DESC);
+CREATE INDEX IF NOT EXISTS idx_workspace_candidates_content
+    ON workspace_candidates(content_ref);
+
+CREATE TABLE IF NOT EXISTS enacted_fields (
+    field_id TEXT PRIMARY KEY,
+    owner_id TEXT NOT NULL,
+    tick_id TEXT NOT NULL UNIQUE REFERENCES tick_frames(tick_id) ON DELETE CASCADE,
+    continuity_token TEXT NOT NULL,
+    previous_field_id TEXT REFERENCES enacted_fields(field_id) ON DELETE SET NULL,
+    status TEXT NOT NULL,
+    trigger_kind TEXT NOT NULL,
+    person_id TEXT,
+    session_id TEXT,
+    started_at TEXT NOT NULL,
+    committed_at TEXT,
+    closed_at TEXT,
+    self_origin_json TEXT NOT NULL DEFAULT '{}',
+    reality_mode TEXT NOT NULL,
+    reality_score REAL NOT NULL,
+    focal_content_ref TEXT,
+    peripheral_content_refs_json TEXT NOT NULL DEFAULT '[]',
+    retention_refs_json TEXT NOT NULL DEFAULT '[]',
+    protention_json TEXT NOT NULL DEFAULT '{}',
+    interoception_json TEXT NOT NULL DEFAULT '{}',
+    precision_json TEXT NOT NULL DEFAULT '{}',
+    affordance_refs_json TEXT NOT NULL DEFAULT '[]',
+    pending_intention_ref TEXT,
+    agency_state_json TEXT NOT NULL DEFAULT '{}',
+    attention_schema_ref TEXT,
+    hor_refs_json TEXT NOT NULL DEFAULT '[]',
+    quality_signature_ref TEXT,
+    phenomenal_surface TEXT NOT NULL DEFAULT '',
+    epistemic_trace_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    CHECK(status IN ('OPEN', 'COMMITTED', 'INVALIDATED', 'CLOSED', 'ABORTED')),
+    CHECK(reality_mode IN ('live', 'inferred', 'remembered', 'imagined', 'mixed')),
+    CHECK(reality_score >= 0.0 AND reality_score <= 1.0)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_enacted_fields_one_committed_owner
+    ON enacted_fields(owner_id)
+    WHERE status = 'COMMITTED';
+CREATE INDEX IF NOT EXISTS idx_enacted_fields_owner_updated
+    ON enacted_fields(owner_id, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_enacted_fields_previous
+    ON enacted_fields(previous_field_id);
+CREATE INDEX IF NOT EXISTS idx_enacted_fields_tick
+    ON enacted_fields(tick_id);
+
+CREATE TABLE IF NOT EXISTS field_runtime_state (
+    owner_id TEXT PRIMARY KEY,
+    continuity_token TEXT NOT NULL,
+    current_field_id TEXT REFERENCES enacted_fields(field_id) ON DELETE SET NULL,
+    open_tick_id TEXT REFERENCES tick_frames(tick_id) ON DELETE SET NULL,
+    state TEXT NOT NULL DEFAULT 'ACTIVE',
+    last_trigger_kind TEXT,
+    last_recovery_at TEXT,
+    updated_at TEXT NOT NULL,
+    CHECK(state IN ('ACTIVE', 'PAUSED'))
+);
+
+CREATE TABLE IF NOT EXISTS field_intentions (
+    action_id TEXT PRIMARY KEY,
+    owner_id TEXT NOT NULL,
+    field_id TEXT NOT NULL REFERENCES enacted_fields(field_id) ON DELETE CASCADE,
+    tick_id TEXT NOT NULL REFERENCES tick_frames(tick_id) ON DELETE CASCADE,
+    tool_name TEXT NOT NULL,
+    tool_input_hash TEXT NOT NULL,
+    normalized_tool_input_json TEXT NOT NULL,
+    intended_goal TEXT NOT NULL,
+    predicted_effects_json TEXT NOT NULL,
+    expected_latency_ms INTEGER,
+    confidence REAL NOT NULL,
+    status TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    closed_at TEXT,
+    CHECK(status IN ('PENDING', 'ALLOWED', 'COMPLETED', 'FAILED', 'UNKNOWN', 'DENIED'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_field_intentions_one_pending_owner
+    ON field_intentions(owner_id)
+    WHERE status IN ('PENDING', 'ALLOWED');
+CREATE INDEX IF NOT EXISTS idx_field_intentions_tick
+    ON field_intentions(tick_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_field_intentions_field
+    ON field_intentions(field_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS field_action_outcomes (
+    outcome_id TEXT PRIMARY KEY,
+    action_id TEXT NOT NULL UNIQUE REFERENCES field_intentions(action_id) ON DELETE CASCADE,
+    field_id TEXT NOT NULL REFERENCES enacted_fields(field_id) ON DELETE CASCADE,
+    tick_id TEXT NOT NULL REFERENCES tick_frames(tick_id) ON DELETE CASCADE,
+    actual_result_ref TEXT,
+    actual_result_summary TEXT NOT NULL DEFAULT '',
+    actual_result_hash TEXT,
+    success INTEGER NOT NULL,
+    latency_ms INTEGER,
+    mismatch_vector_json TEXT NOT NULL DEFAULT '{}',
+    ownership_score REAL NOT NULL,
+    agency_assessment_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    CHECK(ownership_score >= 0.0 AND ownership_score <= 1.0)
+);
+
+CREATE INDEX IF NOT EXISTS idx_field_action_outcomes_tick
+    ON field_action_outcomes(tick_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS field_transitions (
+    transition_id TEXT PRIMARY KEY,
+    owner_id TEXT NOT NULL,
+    from_field_id TEXT REFERENCES enacted_fields(field_id) ON DELETE SET NULL,
+    to_field_id TEXT REFERENCES enacted_fields(field_id) ON DELETE SET NULL,
+    action_id TEXT REFERENCES field_intentions(action_id) ON DELETE SET NULL,
+    from_content_ref TEXT,
+    to_content_ref TEXT,
+    continuity_score REAL NOT NULL,
+    prediction_match REAL NOT NULL,
+    temporal_order INTEGER NOT NULL,
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_field_transitions_owner
+    ON field_transitions(owner_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_field_transitions_content
+    ON field_transitions(from_content_ref, to_content_ref);
+
+CREATE TABLE IF NOT EXISTS quality_signatures (
+    signature_id TEXT PRIMARY KEY,
+    content_ref TEXT NOT NULL,
+    modality TEXT NOT NULL,
+    source_mode TEXT NOT NULL,
+    feature_vector_json TEXT NOT NULL,
+    neighbors_json TEXT NOT NULL DEFAULT '[]',
+    predicted_transitions_json TEXT NOT NULL DEFAULT '[]',
+    valence_associations_json TEXT NOT NULL DEFAULT '{}',
+    discriminability REAL NOT NULL,
+    adaptation_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_quality_signatures_content
+    ON quality_signatures(content_ref, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS field_ablation_runs (
+    ablation_id TEXT PRIMARY KEY,
+    owner_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    fixture_ref TEXT,
+    seed INTEGER,
+    source_field_id TEXT REFERENCES enacted_fields(field_id) ON DELETE SET NULL,
+    baseline_json TEXT NOT NULL,
+    ablated_json TEXT NOT NULL,
+    effect_size_json TEXT NOT NULL,
+    reversible_snapshot_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_field_ablation_runs_owner
+    ON field_ablation_runs(owner_id, created_at DESC);
+"""
+
+_MIGRATION_008_SQL = """
+CREATE INDEX IF NOT EXISTS idx_field_action_outcomes_field
+    ON field_action_outcomes(field_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_field_transitions_from_field
+    ON field_transitions(from_field_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_field_transitions_to_field
+    ON field_transitions(to_field_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_field_transitions_action
+    ON field_transitions(action_id, created_at DESC);
+"""
+
+_MIGRATION_012_SQL = """
+CREATE TABLE IF NOT EXISTS organism_runs (
+    run_id TEXT PRIMARY KEY,
+    owner_id TEXT NOT NULL,
+    ran_at TEXT NOT NULL,
+    elapsed_seconds REAL NOT NULL DEFAULT 0.0,
+    stats_decayed INTEGER NOT NULL DEFAULT 0,
+    decay_factor REAL NOT NULL DEFAULT 1.0,
+    protentions_expired INTEGER NOT NULL DEFAULT 0,
+    max_discomfort REAL NOT NULL DEFAULT 0.0,
+    dominant_desire TEXT,
+    seconds_since_last_field REAL NOT NULL DEFAULT 0.0,
+    ignition_score REAL NOT NULL DEFAULT 0.0,
+    ignited INTEGER NOT NULL DEFAULT 0,
+    tick_id TEXT REFERENCES tick_frames(tick_id) ON DELETE SET NULL,
+    reason TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    CHECK(elapsed_seconds >= 0.0),
+    CHECK(decay_factor > 0.0 AND decay_factor <= 1.0),
+    CHECK(ignition_score >= 0.0 AND ignition_score <= 1.0)
+);
+CREATE INDEX IF NOT EXISTS idx_organism_runs_owner_ran
+    ON organism_runs(owner_id, ran_at DESC);
+"""
+
+# Which Antigravity CLI session speaks for an owner. Claimed when that session's
+# SessionStart hook fires. Subagents never fire SessionStart -- verified against
+# a run where eight of them made 419 tool calls and produced zero session_start
+# ticks -- so they can never take the primary slot, and a hook arriving under a
+# different session is given its own derived owner instead of sharing the
+# parent's field and single pending-intention slot.
+#
+# `RuntimeState` must already accept this column before the migration lands; it
+# forbids extra keys, so the reverse order takes the whole runtime down.
+# ALTER TABLE ADD COLUMN has no IF NOT EXISTS in SQLite, and `apply_migrations`
+# is what guarantees this runs exactly once.
+_MIGRATION_013_SQL = """
+ALTER TABLE field_runtime_state ADD COLUMN session_id TEXT;
+"""
+
+_MIGRATION_011_SQL = """
+CREATE TABLE IF NOT EXISTS process_meta_representations (
+    process_meta_id TEXT PRIMARY KEY,
+    owner_id TEXT NOT NULL,
+    tick_id TEXT NOT NULL REFERENCES tick_frames(tick_id) ON DELETE CASCADE,
+    field_id TEXT NOT NULL REFERENCES enacted_fields(field_id) ON DELETE CASCADE,
+    producer TEXT NOT NULL DEFAULT 'deterministic',
+    trigger_kind TEXT NOT NULL,
+    candidate_count INTEGER NOT NULL,
+    winner_kind TEXT NOT NULL DEFAULT '',
+    competition_margin REAL NOT NULL,
+    competition_entropy REAL NOT NULL,
+    ignited INTEGER NOT NULL,
+    conflicted INTEGER NOT NULL,
+    attention_intensity REAL NOT NULL,
+    registered_intention INTEGER NOT NULL DEFAULT 0,
+    hor_channel_bias_json TEXT NOT NULL DEFAULT '{}',
+    canonical_statement TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    CHECK(competition_entropy >= 0.0 AND competition_entropy <= 1.0),
+    CHECK(attention_intensity >= 0.0 AND attention_intensity <= 1.0),
+    CHECK(candidate_count >= 0)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_process_meta_tick
+    ON process_meta_representations(tick_id);
+CREATE INDEX IF NOT EXISTS idx_process_meta_owner_created
+    ON process_meta_representations(owner_id, created_at DESC);
+"""
+
+_MIGRATION_010_SQL = """
+CREATE TABLE IF NOT EXISTS body_contingencies (
+    contingency_id TEXT PRIMARY KEY,
+    owner_id TEXT NOT NULL,
+    action_id TEXT REFERENCES field_intentions(action_id) ON DELETE SET NULL,
+    outcome_ref TEXT REFERENCES field_action_outcomes(outcome_id) ON DELETE SET NULL,
+    field_id TEXT REFERENCES enacted_fields(field_id) ON DELETE CASCADE,
+    tick_id TEXT REFERENCES tick_frames(tick_id) ON DELETE CASCADE,
+    channel TEXT NOT NULL DEFAULT 'camera_pose',
+    commanded_delta_json TEXT NOT NULL DEFAULT '{}',
+    observed_before_json TEXT NOT NULL DEFAULT '{}',
+    observed_after_json TEXT NOT NULL DEFAULT '{}',
+    observed_delta_json TEXT NOT NULL DEFAULT '{}',
+    verdict TEXT NOT NULL,
+    reafference_score REAL NOT NULL,
+    direction_score REAL NOT NULL,
+    magnitude_score REAL NOT NULL,
+    timing_score REAL NOT NULL,
+    magnitude_ratio REAL,
+    observed_latency_ms INTEGER,
+    expected_latency_ms INTEGER,
+    observation_source TEXT NOT NULL DEFAULT 'measured',
+    rationale_json TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL,
+    CHECK(reafference_score >= 0.0 AND reafference_score <= 1.0),
+    CHECK(direction_score >= 0.0 AND direction_score <= 1.0),
+    CHECK(magnitude_score >= 0.0 AND magnitude_score <= 1.0),
+    CHECK(timing_score >= 0.0 AND timing_score <= 1.0),
+    CHECK(observation_source IN ('measured', 'declared')),
+    CHECK(verdict IN (
+        'self_caused', 'inverted', 'unresponsive',
+        'externally_caused', 'no_change', 'unverified'
+    ))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_body_contingencies_action
+    ON body_contingencies(action_id) WHERE action_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_body_contingencies_owner_created
+    ON body_contingencies(owner_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_body_contingencies_verdict
+    ON body_contingencies(verdict, created_at DESC);
+"""
+
+_MIGRATION_009_SQL = """
+CREATE TABLE IF NOT EXISTS protention_distributions (
+    distribution_id TEXT PRIMARY KEY,
+    owner_id TEXT NOT NULL,
+    field_id TEXT NOT NULL REFERENCES enacted_fields(field_id) ON DELETE CASCADE,
+    tick_id TEXT NOT NULL REFERENCES tick_frames(tick_id) ON DELETE CASCADE,
+    action_ref TEXT REFERENCES field_intentions(action_id) ON DELETE SET NULL,
+    entropy REAL NOT NULL,
+    model_version TEXT NOT NULL,
+    trajectory_count INTEGER NOT NULL,
+    fork_id TEXT,
+    created_at TEXT NOT NULL,
+    CHECK(entropy >= 0.0 AND entropy <= 1.0)
+);
+CREATE INDEX IF NOT EXISTS idx_protention_distributions_field
+    ON protention_distributions(field_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_protention_distributions_action
+    ON protention_distributions(action_ref);
+
+CREATE TABLE IF NOT EXISTS imagined_trajectories (
+    trajectory_id TEXT PRIMARY KEY,
+    distribution_id TEXT NOT NULL
+        REFERENCES protention_distributions(distribution_id) ON DELETE CASCADE,
+    owner_id TEXT NOT NULL,
+    field_id TEXT NOT NULL REFERENCES enacted_fields(field_id) ON DELETE CASCADE,
+    tick_id TEXT NOT NULL REFERENCES tick_frames(tick_id) ON DELETE CASCADE,
+    action_ref TEXT REFERENCES field_intentions(action_id) ON DELETE SET NULL,
+    action_kind TEXT NOT NULL,
+    context_signature TEXT NOT NULL,
+    horizon INTEGER NOT NULL,
+    steps_json TEXT NOT NULL,
+    probability REAL NOT NULL,
+    uncertainty REAL NOT NULL,
+    source_mode TEXT NOT NULL,
+    status TEXT NOT NULL,
+    status_history_json TEXT NOT NULL DEFAULT '[]',
+    expires_at TEXT,
+    fork_id TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    CHECK(status IN ('imagined','intended','enacted','observed',
+                     'contradicted','partially_observed','expired')),
+    CHECK(source_mode IN ('imagined')),
+    CHECK(probability >= 0.0 AND probability <= 1.0),
+    CHECK(horizon >= 1 AND horizon <= 5)
+);
+CREATE INDEX IF NOT EXISTS idx_imagined_trajectories_distribution
+    ON imagined_trajectories(distribution_id);
+CREATE INDEX IF NOT EXISTS idx_imagined_trajectories_action
+    ON imagined_trajectories(action_ref, status);
+CREATE INDEX IF NOT EXISTS idx_imagined_trajectories_field
+    ON imagined_trajectories(field_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS experienced_transitions (
+    transition_id TEXT PRIMARY KEY,
+    owner_id TEXT NOT NULL,
+    previous_field_id TEXT REFERENCES enacted_fields(field_id) ON DELETE SET NULL,
+    next_field_id TEXT NOT NULL UNIQUE REFERENCES enacted_fields(field_id) ON DELETE CASCADE,
+    previous_tick_id TEXT,
+    next_tick_id TEXT NOT NULL,
+    action_ref TEXT REFERENCES field_intentions(action_id) ON DELETE SET NULL,
+    outcome_ref TEXT,
+    intended_trajectory_id TEXT
+        REFERENCES imagined_trajectories(trajectory_id) ON DELETE SET NULL,
+    distribution_id TEXT,
+    context_signature TEXT NOT NULL,
+    action_kind TEXT NOT NULL,
+    outcome_bucket TEXT NOT NULL,
+    observed_external_json TEXT NOT NULL DEFAULT '{}',
+    observed_internal_json TEXT NOT NULL DEFAULT '{}',
+    observed_social_json TEXT NOT NULL DEFAULT '{}',
+    prediction_errors_json TEXT NOT NULL DEFAULT '{}',
+    mean_prediction_error REAL NOT NULL,
+    valence_before REAL NOT NULL,
+    valence_after REAL NOT NULL,
+    valence_change REAL NOT NULL,
+    arousal_before REAL NOT NULL,
+    arousal_after REAL NOT NULL,
+    controllability_delta REAL NOT NULL DEFAULT 0.0,
+    agency_confidence REAL NOT NULL,
+    ownership_confidence REAL NOT NULL,
+    success INTEGER,
+    latency_ms INTEGER,
+    expected_latency_ms INTEGER,
+    source_mode TEXT NOT NULL,
+    knowledge_source TEXT NOT NULL DEFAULT 'experienced',
+    info_content_hash TEXT,
+    pose_before_ref TEXT,
+    pose_after_ref TEXT,
+    body_delta_json TEXT NOT NULL DEFAULT '{}',
+    process_meta_ref TEXT,
+    allostatic_snapshot_json TEXT NOT NULL DEFAULT '{}',
+    hor_ref TEXT,
+    fork_id TEXT,
+    applied_at TEXT,
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    CHECK(source_mode IN ('live','inferred','mixed')),
+    CHECK(knowledge_source IN ('experienced','told','imagined','replayed'))
+);
+CREATE INDEX IF NOT EXISTS idx_experienced_transitions_owner
+    ON experienced_transitions(owner_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_experienced_transitions_context
+    ON experienced_transitions(context_signature, action_kind);
+CREATE INDEX IF NOT EXISTS idx_experienced_transitions_action
+    ON experienced_transitions(action_ref);
+
+CREATE TABLE IF NOT EXISTS generative_transition_stats (
+    owner_id TEXT NOT NULL,
+    focus_kind TEXT NOT NULL,
+    trigger_kind TEXT NOT NULL,
+    dominant_desire TEXT NOT NULL DEFAULT '',
+    valence_bucket TEXT NOT NULL,
+    arousal_bucket TEXT NOT NULL,
+    action_kind TEXT NOT NULL,
+    outcome_bucket TEXT NOT NULL,
+    observation_count REAL NOT NULL DEFAULT 0,
+    sum_valence_delta REAL NOT NULL DEFAULT 0.0,
+    sum_latency_ms REAL NOT NULL DEFAULT 0.0,
+    sum_prediction_error REAL NOT NULL DEFAULT 0.0,
+    last_transition_id TEXT,
+    model_version TEXT NOT NULL DEFAULT 'count_v1',
+    first_observed_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (owner_id, focus_kind, trigger_kind, dominant_desire,
+                 valence_bucket, arousal_bucket, action_kind, outcome_bucket)
+);
+CREATE INDEX IF NOT EXISTS idx_generative_stats_action
+    ON generative_transition_stats(owner_id, action_kind, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS prediction_resolutions (
+    resolution_id TEXT PRIMARY KEY,
+    trajectory_id TEXT NOT NULL
+        REFERENCES imagined_trajectories(trajectory_id) ON DELETE CASCADE,
+    step_index INTEGER NOT NULL,
+    transition_id TEXT NOT NULL
+        REFERENCES experienced_transitions(transition_id) ON DELETE CASCADE,
+    hit INTEGER NOT NULL,
+    component_errors_json TEXT NOT NULL DEFAULT '{}',
+    resolved_at TEXT NOT NULL,
+    UNIQUE(trajectory_id, step_index)
+);
+"""
+
+
 MIGRATIONS = [
     Migration(
         name="001_initial_schema",
@@ -293,6 +860,50 @@ MIGRATIONS = [
     Migration(
         name="002_interaction_orchestrator",
         sql=_MIGRATION_002_SQL,
+    ),
+    Migration(
+        name="003_counterfactuals",
+        sql=_MIGRATION_003_SQL,
+    ),
+    Migration(
+        name="004_tick_frames",
+        sql=_MIGRATION_004_SQL,
+    ),
+    Migration(
+        name="005_attention_schemas",
+        sql=_MIGRATION_005_SQL,
+    ),
+    Migration(
+        name="006_hor_records",
+        sql=_MIGRATION_006_SQL,
+    ),
+    Migration(
+        name="007_enacted_first_person_field",
+        sql=_MIGRATION_007_SQL,
+    ),
+    Migration(
+        name="008_enacted_field_indexes",
+        sql=_MIGRATION_008_SQL,
+    ),
+    Migration(
+        name="009_generative_field_model",
+        sql=_MIGRATION_009_SQL,
+    ),
+    Migration(
+        name="010_body_contingency",
+        sql=_MIGRATION_010_SQL,
+    ),
+    Migration(
+        name="011_process_meta_representations",
+        sql=_MIGRATION_011_SQL,
+    ),
+    Migration(
+        name="012_organism_runs",
+        sql=_MIGRATION_012_SQL,
+    ),
+    Migration(
+        name="013_runtime_primary_session",
+        sql=_MIGRATION_013_SQL,
     ),
 ]
 

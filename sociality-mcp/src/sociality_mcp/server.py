@@ -24,7 +24,7 @@ from joint_attention_mcp.store import JointAttentionStore
 from mcp.server.fastmcp import FastMCP
 from relationship_mcp.store import RelationshipStore
 from self_narrative_mcp.store import SelfNarrativeStore
-from social_core import SocialDB
+from social_core import SocialDB, companion_id
 from social_state_mcp.inference import should_interrupt_result, turn_taking_state
 from social_state_mcp.inference import (
     summarize_social_context as build_social_context_summary,
@@ -361,11 +361,15 @@ def review_social_post(
                 if len(location_signals) >= 2:
                     out["risk_level"] = "high"
                     out["issues"] = out.get("issues", []) + [
-                        f"location identification risk: {len(location_signals)} signals found ({', '.join(location_signals)})"
+                        "location identification risk: "
+                        f"{len(location_signals)} signals found "
+                        f"({', '.join(location_signals)})"
                     ]
                     out["recommendation"] = "deny"
             # Window/balcony photo rule
-            if ("窓" in rule_lower or "ベランダ" in rule_lower) and ("写真" in rule_lower or "投稿" in rule_lower):
+            if (
+                "窓" in rule_lower or "ベランダ" in rule_lower
+            ) and ("写真" in rule_lower or "投稿" in rule_lower):
                 if "ベランダ" in text or "窓から" in text:
                     if scene_contains_face or "写真" in text or "画像" in text:
                         out["risk_level"] = "high"
@@ -453,7 +457,7 @@ def reflect_on_change(horizon_days: int = 7) -> dict[str, Any]:
 
 @mcp.tool()
 def compose_interaction_context_tool(
-    person_id: str | None = "kouta",
+    person_id: str | None = companion_id(),
     channel: str = "chat",
     user_text: str | None = None,
     autonomous_trigger: str | None = None,
@@ -568,7 +572,7 @@ def append_private_reflection(payload: dict[str, Any]) -> dict[str, str]:
 def compose_private_letter(payload: dict[str, Any]) -> dict[str, str]:
     """Store a composed letter that may later be shared.
 
-    This tool does NOT write prose — Claude composes the body; the tool
+    This tool does NOT write prose — the agent composes the body; the tool
     persists it together with metadata (intended_time, visibility,
     related_open_loops). Useful for the morning-letter / end-of-day pattern.
     """
@@ -605,7 +609,10 @@ def get_agent_state(person_id: str | None = None) -> dict[str, Any]:
     return ctx.agent_state.model_dump(mode="json")
 
 
-async def _handle_http(reader: __import__("asyncio").StreamReader, writer: __import__("asyncio").StreamWriter) -> None:
+async def _handle_http(
+    reader: __import__("asyncio").StreamReader,
+    writer: __import__("asyncio").StreamWriter,
+) -> None:
     """Lightweight HTTP endpoints for hook integration."""
     import asyncio
     import json
@@ -651,7 +658,8 @@ async def _handle_http(reader: __import__("asyncio").StreamReader, writer: __imp
         status = "404 Not Found"
 
         if "GET /ingest" in req:
-            # Ingest a human utterance: /ingest?person_id=kouta&text=hello&kind=human_utterance
+            # Ingest a human utterance:
+            # /ingest?person_id=<COMPANION_ID>&text=hello&kind=human_utterance
             from datetime import datetime, timezone
             person_id = params.get("person_id", [None])[0]
             text = params.get("text", [""])[0]
@@ -699,7 +707,10 @@ async def _handle_http(reader: __import__("asyncio").StreamReader, writer: __imp
             person_id = params.get("person_id", [None])[0]
             stores = _stores()
             window = int(params.get("window", ["900"])[0])
-            result = stores.social_state.get_social_state(person_id=person_id, window_seconds=window)
+            result = stores.social_state.get_social_state(
+                person_id=person_id,
+                window_seconds=window,
+            )
             body = json.dumps(result.model_dump(mode="json"), ensure_ascii=False)
             status = "200 OK"
 
@@ -707,7 +718,7 @@ async def _handle_http(reader: __import__("asyncio").StreamReader, writer: __imp
             stores = _stores()
             ctx = compose_interaction_context(
                 ComposeInteractionContextInput(
-                    person_id=params.get("person_id", ["kouta"])[0],
+                    person_id=params.get("person_id", [companion_id()])[0],
                     channel=params.get("channel", ["chat"])[0],
                     user_text=params.get("text", [None])[0],
                     autonomous_trigger=params.get("trigger", [None])[0],
@@ -755,13 +766,25 @@ async def _handle_http(reader: __import__("asyncio").StreamReader, writer: __imp
             )
             status = "200 OK"
 
-        response = f"HTTP/1.1 {status}\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {len(body.encode())}\r\nConnection: close\r\n\r\n{body}"
+        response = (
+            f"HTTP/1.1 {status}\r\n"
+            "Content-Type: application/json; charset=utf-8\r\n"
+            f"Content-Length: {len(body.encode())}\r\n"
+            "Connection: close\r\n\r\n"
+            f"{body}"
+        )
         writer.write(response.encode("utf-8"))
         await writer.drain()
     except Exception as e:
         import traceback
         err_body = json.dumps({"error": str(e), "trace": traceback.format_exc()})
-        err_resp = f"HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: {len(err_body.encode())}\r\nConnection: close\r\n\r\n{err_body}"
+        err_resp = (
+            "HTTP/1.1 500 Internal Server Error\r\n"
+            "Content-Type: application/json\r\n"
+            f"Content-Length: {len(err_body.encode())}\r\n"
+            "Connection: close\r\n\r\n"
+            f"{err_body}"
+        )
         try:
             writer.write(err_resp.encode("utf-8"))
             await writer.drain()

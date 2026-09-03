@@ -1,6 +1,6 @@
 # interaction-orchestrator-mcp
 
-Human Response Orchestrator for Embodied Claude / Kokone v0.3.
+Human Response Orchestrator for Embodied Agy / Kokone v0.3.
 
 This package is consumed by the top-level `sociality-mcp` façade and is not
 run as a standalone MCP server. It exposes the coordination layer that turns

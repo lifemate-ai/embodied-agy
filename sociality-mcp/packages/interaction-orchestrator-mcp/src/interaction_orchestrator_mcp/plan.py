@@ -21,11 +21,13 @@ def plan_response(payload: PlanResponseInput) -> ResponsePlan:
     """Compute a response plan from an interaction context.
 
     The logic is intentionally deterministic and shallow: it picks the
-    strongest applicable rule and exposes it. The caller (Claude) is then
+    strongest applicable rule and exposes it. The caller (the agent) is then
     responsible for composing actual language under these constraints.
     """
 
     ctx = payload.interaction_context
+    if ctx.current_field_id is None and not ctx.field_compatibility_mode:
+        raise RuntimeError("response planning requires a committed field")
     social = ctx.social_state or {}
     phase = str(social.get("interaction_phase") or "idle")
     availability = str(social.get("availability") or "unknown")
@@ -69,6 +71,7 @@ def plan_response(payload: PlanResponseInput) -> ResponsePlan:
 
     return ResponsePlan(
         primary_move=primary_move,
+        source_field_id=ctx.current_field_id,
         why_this_move=why,
         tone=tone,
         memory_use=memory_use,

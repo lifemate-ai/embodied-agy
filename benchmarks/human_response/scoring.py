@@ -3,7 +3,7 @@
 The benchmark measures whether the interaction-orchestrator produces the
 right *structural* response plan for a given fixture. It does not generate
 prose; it validates the plan, the compact prompt block, and the response
-contract that Claude will subsequently write under.
+contract that the agent will subsequently write under.
 
 Scoring follows §15.2 of the v0.3 spec. Each fixture carries expectations
 keyed by dimension. A fixture's per-dimension score = (matched / total)

@@ -1,0 +1,42 @@
+{
+  "embodied-agy-efpf": {
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run --directory .. --package kernel-mcp efpf-agy-hook pre-tool-use",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run --directory .. --package kernel-mcp efpf-agy-hook post-tool-use",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PreInvocation": [
+      {
+        "type": "command",
+        "command": "uv run --directory .. --package kernel-mcp efpf-agy-hook pre-invocation",
+        "timeout": 15
+      }
+    ],
+    "Stop": [
+      {
+        "type": "command",
+        "command": "uv run --directory .. --package kernel-mcp efpf-agy-hook stop",
+        "timeout": 10
+      }
+    ]
+  }
+}

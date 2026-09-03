@@ -1,11 +1,14 @@
 [project]
 name = "system-temperature-mcp"
-version = "0.1.0"
+version = "0.4.6"
 description = "MCP server for monitoring system temperature - your sense of body temperature"
 requires-python = ">=3.12"
 dependencies = [
     "mcp>=1.0.0",
     "psutil>=5.9.0",
+    # Windows ships no IANA time zone database, so zoneinfo needs tzdata to
+    # resolve keys like "Asia/Tokyo". Linux/WSL2 has the system tzdb already.
+    "tzdata>=2024.1; sys_platform == 'win32'",
 ]
 
 [project.scripts]

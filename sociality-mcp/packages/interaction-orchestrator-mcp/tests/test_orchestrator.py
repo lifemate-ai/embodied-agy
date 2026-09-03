@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import json
+
+from boundary_mcp.schemas import QuietModeState
+
 from interaction_orchestrator_mcp.compose import compose_interaction_context
 from interaction_orchestrator_mcp.plan import plan_response
 from interaction_orchestrator_mcp.schemas import (
@@ -30,6 +34,36 @@ def _compose(stores, *, user_text=None, channel="chat", person_id="kouta", memor
     )
 
 
+def _seed_dominant_desire(monkeypatch, tmp_path):
+    """Point the orchestrator at a snapshot with one clear dominant desire."""
+    fake_desires = tmp_path / "desires.json"
+    fake_desires.write_text(
+        json.dumps(
+            {
+                "updated_at": "2026-04-19T10:00:00+00:00",
+                "desires": {"browse_curiosity": 0.9, "observe_room": 0.2},
+                "discomforts": {"browse_curiosity": 0.6, "observe_room": 0.0},
+                "dominant": "browse_curiosity",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DESIRES_PATH", str(fake_desires))
+
+
+def _pin_quiet_hours(monkeypatch, stores, *, active: bool) -> None:
+    """Fix the quiet-hours verdict.
+
+    The policy resolves quiet hours against the wall clock in Asia/Tokyo, so a
+    planning test that leaves it unset asserts a different branch depending on
+    the hour it runs at. Each caller states which regime it is testing.
+    """
+    state = QuietModeState(active=active, confidence=1.0, reasons=["pinned by test"])
+    monkeypatch.setattr(
+        stores["boundary"], "get_quiet_mode_state", lambda **_kwargs: state
+    )
+
+
 class TestCompose:
     def test_returns_context_with_contract_and_prompt_block(self, stores):
         ctx = _compose(stores, user_text="テスト")
@@ -37,6 +71,25 @@ class TestCompose:
         assert "[response_contract]" in ctx.compact_prompt_block
         assert ctx.compact_prompt_block.startswith("[interaction_context]")
         assert ctx.timezone == "Asia/Tokyo"
+
+    def test_primary_contract_follows_companion_id(self, stores, monkeypatch):
+        """The primary-companion contract is for whoever COMPANION_ID names (#135)."""
+        monkeypatch.delenv("COMPANION_ID", raising=False)
+        default_ctx = _compose(stores, user_text="テスト", person_id="companion")
+        assert "generic reassurance" in default_ctx.response_contract.avoid
+
+        other = _compose(stores, user_text="テスト", person_id="kouta")
+        assert "generic reassurance" not in other.response_contract.avoid
+
+        monkeypatch.setenv("COMPANION_ID", "kouta")
+        named = _compose(stores, user_text="テスト", person_id="kouta")
+        assert "generic reassurance" in named.response_contract.avoid
+
+    def test_person_id_defaults_to_companion_id(self, monkeypatch):
+        monkeypatch.delenv("COMPANION_ID", raising=False)
+        assert ComposeInteractionContextInput().person_id == "companion"
+        monkeypatch.setenv("COMPANION_ID", "kouta")
+        assert ComposeInteractionContextInput().person_id == "kouta"
 
     def test_autonomous_channel_tightens_contract(self, stores):
         ctx = _compose(stores, user_text=None, channel="autonomous")
@@ -218,28 +271,8 @@ class TestPlan:
         assert plan.memory_use.max_memories_to_surface >= 1
 
     def test_autonomous_with_dominant_desire_is_bounded(self, stores, monkeypatch, tmp_path):
-        # Seed desires.json so the orchestrator sees a dominant desire.
-        import json as _json
-
-        fake_desires = tmp_path / "desires.json"
-        fake_desires.write_text(
-            _json.dumps(
-                {
-                    "updated_at": "2026-04-19T10:00:00+00:00",
-                    "desires": {
-                        "browse_curiosity": 0.9,
-                        "observe_room": 0.2,
-                    },
-                    "discomforts": {
-                        "browse_curiosity": 0.6,
-                        "observe_room": 0.0,
-                    },
-                    "dominant": "browse_curiosity",
-                }
-            ),
-            encoding="utf-8",
-        )
-        monkeypatch.setenv("DESIRES_PATH", str(fake_desires))
+        _seed_dominant_desire(monkeypatch, tmp_path)
+        _pin_quiet_hours(monkeypatch, stores, active=False)
         ctx = _compose(stores, user_text=None, channel="autonomous")
         plan = plan_response(
             PlanResponseInput(interaction_context=ctx, user_text=None)
@@ -248,3 +281,16 @@ class TestPlan:
         assert "web_search" in plan.initiative.allowed_actions
         assert plan.followup_action is not None
         assert plan.followup_action["kind"] == "satisfy_desire"
+
+    def test_autonomous_during_quiet_hours_stays_private(
+        self, stores, monkeypatch, tmp_path
+    ):
+        _seed_dominant_desire(monkeypatch, tmp_path)
+        _pin_quiet_hours(monkeypatch, stores, active=True)
+        ctx = _compose(stores, user_text=None, channel="autonomous")
+        plan = plan_response(
+            PlanResponseInput(interaction_context=ctx, user_text=None)
+        )
+        assert plan.primary_move == "write_private_reflection"
+        assert plan.voice is not None
+        assert plan.voice.speak is False

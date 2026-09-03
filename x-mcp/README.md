@@ -5,7 +5,7 @@ MCP server for searching X (Twitter) in real-time via xAI Grok live search.
 ## Setup
 
 ```bash
-cp .env.example .env
+cp x-mcp/.env.example x-mcp/.env
 # Fill in your XAI_API_KEY
 uv sync
 ```
@@ -21,13 +21,13 @@ uv sync
 
 ## Antigravity CLI integration
 
-Add to `~/.gemini/settings.json`:
+Add to the project `.agents/mcp_config.json` (or the user-level `~/.gemini/config/mcp_config.json`):
 
 ```json
 "mcpServers": {
   "grok-mcp": {
     "command": "uv",
-    "args": ["run", "--project", "/path/to/grok-mcp", "python", "/path/to/grok-mcp/src/server.py"],
+    "args": ["run", "--directory", "/path/to/embodied-agy", "--package", "x-mcp", "x-mcp"],
     "env": {}
   }
 }

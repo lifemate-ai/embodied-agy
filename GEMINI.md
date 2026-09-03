@@ -1,60 +1,83 @@
 # Embodied Agy - プロジェクト指示
 
-このプロジェクトは[Antigravity CLI](https://antigravity.google/blog/introducing-google-antigravity-cli)に身体（目・首・耳・声・脳）を与え、sociality（社会的中間層）を積む MCP サーバー群です。
+このプロジェクトは、[Antigravity CLI](https://antigravity.google/docs/cli/using/)（`agy`）で
+動くエージェントに身体（目・首・耳・声・脳）を与え、その上に sociality（社会的中間層）を
+積む MCP サーバー群です。[embodied-claude](https://github.com/lifemate-ai/embodied-claude)
+0.4.6 の Antigravity CLI 移植で、移植が前提にしている agy の挙動は `docs/antigravity.md` に
+まとめてある。
 
 ## ディレクトリ構造
 
 ```
 embodied-agy/
-├── usb-webcam-mcp/                   # USB ウェブカメラ制御（Python）
+├── pyproject.toml         # root uv workspace（全 Python package が root .venv / uv.lock を共有）
+├── GEMINI.md              # このファイル。Antigravity CLI が読む project 指示（AGENTS.md も読まれる）
+├── socialPolicy.toml      # boundary の既定ポリシー
+├── mcpBehavior.toml       # 行動設定（エージェントが編集可能）
+│
+├── usb-webcam-mcp/        # USB ウェブカメラ制御（Python）
 │   └── src/usb_webcam_mcp/
-│       └── server.py                # MCP サーバー実装
+│       └── server.py      # MCP サーバー実装
 │
-├── wifi-cam-mcp/                     # Wi-Fi PTZ カメラ制御（Python）
+├── wifi-cam-mcp/          # Wi-Fi PTZ カメラ制御（Python）
 │   └── src/wifi_cam_mcp/
-│       ├── server.py                # MCP サーバー実装
-│       ├── camera.py                # Tapo カメラ制御
-│       └── config.py                # 設定管理
+│       ├── server.py      # MCP サーバー実装
+│       ├── camera.py      # Tapo カメラ制御
+│       └── config.py      # 設定管理
 │
-├── tts-mcp/                          # TTS 統合サーバー（ElevenLabs + VOICEVOX）
+├── tts-mcp/               # TTS 統合サーバー（ElevenLabs + VOICEVOX）
 │   └── src/tts_mcp/
-│       ├── server.py                # MCP サーバー実装
-│       ├── config.py                # 設定管理
-│       ├── playback.py              # 再生ロジック
-│       ├── go2rtc.py                # go2rtc プロセス管理
+│       ├── server.py      # MCP サーバー実装
+│       ├── config.py      # 設定管理
+│       ├── playback.py    # 再生ロジック
+│       ├── go2rtc.py      # go2rtc プロセス管理
 │       └── engines/
-│           ├── __init__.py          # TTSEngine Protocol
-│           ├── elevenlabs.py        # ElevenLabs エンジン
-│           └── voicevox.py          # VOICEVOX エンジン
+│           ├── __init__.py    # TTSEngine Protocol
+│           ├── elevenlabs.py  # ElevenLabs エンジン
+│           └── voicevox.py    # VOICEVOX エンジン
 │
-├── memory-mcp/                       # 長期記憶システム（Python）
+├── memory-mcp/            # 長期記憶システム（Python）
 │   └── src/memory_mcp/
-│       ├── server.py                # MCP サーバー実装
-│       ├── memory.py                # ChromaDB 操作
-│       ├── types.py                 # 型定義（Emotion, Category）
-│       └── config.py                # 設定管理
+│       ├── server.py      # MCP サーバー実装
+│       ├── memory.py      # 記憶ストア操作（SQLite + numpy）
+│       ├── types.py       # 型定義（Emotion, Category）
+│       └── config.py      # 設定管理
 │
-├── system-temperature-mcp/           # 体温感覚（Python）
+├── desire-system/         # 欲求システム（MCP サーバー + desire_updater）
+├── system-temperature-mcp/ # 体温感覚（Python）
 │   └── src/system_temperature_mcp/
-│       └── server.py                # 温度センサー読み取り
+│       └── server.py      # 温度センサー読み取り
+├── x-mcp/                 # X（Twitter）の検索・投稿
 │
-├── social-core/                # sociality 共通DB・モデル（Python）
-│   └── src/social_core/
-│       ├── db.py              # SQLite + migration
-│       ├── events.py          # append-only event store
-│       └── models.py          # 共通 schema
+├── sociality-mcp/         # sociality 統合 façade（公開 MCP）
+│   └── packages/
+│       ├── social-core/           # sociality 共通DB・モデル（SQLite + migration、event store）
+│       ├── social-state-mcp/      # 現在の社会的状態推定
+│       ├── relationship-mcp/      # 関係性の圧縮表現と約束管理
+│       ├── joint-attention-mcp/   # 共同注意と参照解決
+│       ├── boundary-mcp/          # 同意・静寂・プライバシーの行動ゲート
+│       ├── self-narrative-mcp/    # daybook と narrative arc
+│       ├── interaction-orchestrator-mcp/ # compose → plan → record のループ
+│       └── agent-grammar/         # sociality 内部 package
 │
-├── sociality-mcp/              # sociality 統合 façade（公開 MCP）
-├── social-state-mcp/           # 現在の社会的状態推定（Python）
-├── relationship-mcp/           # 関係性の圧縮表現と約束管理（Python）
-├── joint-attention-mcp/        # 共同注意と参照解決（Python）
-├── boundary-mcp/               # 同意・静寂・プライバシーの行動ゲート（Python）
-├── self-narrative-mcp/         # daybook と narrative arc（Python）
+├── consciousness-mcp/     # EFPF（Enacted First-Person Field）runtime
+│   └── packages/kernel-mcp/
+│       └── src/kernel_mcp/
+│           ├── server.py          # MCP サーバー実装
+│           ├── agy_hook_cli.py    # efpf-agy-hook（Antigravity CLI hook adapter）
+│           ├── agy_tools.py       # agy の tool 名 → kernel の語彙への写像
+│           ├── agy_transcript.py  # transcript_full.jsonl の読み取り
+│           └── hook_cli.py        # efpf-hook（Claude Code 用 adapter。Claude Code で開いた checkout のために残す）
 │
-├── socialPolicy.toml           # boundary-mcp の既定ポリシー
+├── scripts/               # setup / doctor / seed / reader などの補助ツール
+├── docs/                  # antigravity.md（agy との契約）、setup.md ほか
 │
-└── .agent/                     # Antigravity CLI ローカル設定
-    └── mcp_config.json.example
+└── .agents/               # Antigravity CLI の workspace 設定（folder を trust すると読まれる）
+    ├── hooks.json         # efpf-agy-hook を PreInvocation / PreToolUse / PostToolUse / Stop に配線
+    ├── hooks.example.json # 任意の sense hooks（interoception / auto-recall / auto-social / hearing）を足した例
+    ├── hooks/             # hook script 群（hook の cwd は .agents/、リポジトリ直下は ..）
+    ├── skills/<name>/SKILL.md  # session 内で /<name> として呼ぶ skill
+    └── mcp_config.json.example # .agents/mcp_config.json（gitignored、setup が書く）の雛形
 ```
 
 ## 開発ガイドライン
@@ -62,33 +85,34 @@ embodied-agy/
 ### Python プロジェクト共通
 
 - **パッケージマネージャー**: uv
-- **Python バージョン**: 既存サーバーは 3.10+、sociality MCP 群は 3.12+
+- **Python バージョン**: 3.13（root `.python-version` で固定）
+- **workspace**: 全 Python package が root `.venv` と `uv.lock` を共有
 - **テストフレームワーク**: pytest + pytest-asyncio
 - **リンター**: ruff
 - **非同期**: asyncio ベース
 
 ```bash
-# 依存関係インストール（dev含む）
-uv sync --extra dev
+# 全 package と dev dependency を一括 install
+uv sync
 
 # リント
 uv run ruff check .
 
-# テスト実行
-uv run pytest
+# package ごとのテスト実行
+uv run pytest <package-dir>/tests
 
 # サーバー起動
-uv run <server-name>
+uv run --package <package-name> <server-name>
 ```
 
 ### コミット前のチェック（必須）
 
-各サブプロジェクトで以下を実行してからコミットすること:
+root workspace から対象 package を指定して実行すること:
 
 ```bash
-cd <project-dir>
-uv run ruff check .    # lint エラーがないこと
-uv run pytest -v       # テストが通ること
+uv lock --check
+uv run ruff check <project-dir>
+uv run pytest <project-dir>/tests -v
 ```
 
 ## MCP ツール一覧
@@ -239,26 +263,79 @@ orchestration 層。従来の social-state / relationship / self-narrative / bou
 | `compose_interaction_context_tool` | person_id?, channel?, user_text?, autonomous_trigger?, include_private?, max_chars? | 応答前に呼ぶ。social state / relationship / open loops / desire / 最近の experience / relevant_memories（memory.db から recall）/ response_contract を 1 つにまとめて返す |
 | `plan_response_tool` | interaction_context, user_text?, candidate_goal? | compose の結果を受けて primary_move（answer_directly / stay_silent / write_private_reflection など）、tone、memory_use、initiative（allowed / forbidden actions）、voice、must_include / must_avoid、followup_action を決定 |
 | `record_agent_experience` | payload | 応答・自律行動・境界遵守・欲求充足・interpretation_shift 等を experience として保存。次の compose で `recent_experiences` に surface される |
-| `record_interpretation_shift` | payload | 規則/関係/自己モデルの解釈を更新した瞬間を記録。`agent_state.interpretation_shifts` で以降の plan が自動的に「regress しない」制約を must_include に載せる |
+| `record_interpretation_shift` | payload | 規則/関係/自己モデルの解釈を更新した瞬間を記録。`agent_state.interpretation_shifts` で以降の plan が自動的に「regress せえへん」制約を must_include に載せる |
 | `append_private_reflection` | payload | 誰にも nudge せんと private なメモを残す。深夜帯の autonomous tick で write_private_reflection が選ばれた時に使う |
-| `compose_private_letter` | payload | 朝の手紙的な letter を保存。後で共有するかは visibility で制御 |
+| `compose_private_letter` | payload | 朝の手紙的な letter を保存（本文はエージェントが書く）。後で共有するかは visibility で制御 |
 | `get_agent_state` | person_id? | compose より軽量。欲求、最近の experience、active arcs のみ返す。introspection 用 |
+
+### kernel-mcp（脳の自己観察層）
+
+`consciousness-mcp/packages/kernel-mcp/`。counterfactual / tick frame /
+attention schema / HOR に加え、EFPF の workspace competition、committed field、
+intention、prediction/outcome loop を MCP と hooks に露出する。TTS、投稿、カメラ移動、
+file/network side effect は committed field と matching intention がない限り
+`PreToolUse` で拒否され、boundary policy と一 tick 一外向き行為の bottleneck も通る。
+
+hooks は `.agents/hooks.json` が `efpf-agy-hook`（`kernel_mcp.agy_hook_cli`）を
+`PreInvocation` / `PreToolUse` / `PostToolUse` / `Stop` に配線する。hook コマンドは
+`.agents/` を cwd として `uv run --directory .. --package kernel-mcp efpf-agy-hook <event>`
+の形で起動される（リポジトリ直下は `..`）。agy の `call_mcp_tool` や `run_command` は
+`agy_tools.canonical_tool_call` で `mcp__<server>__<tool>` / `Bash` などの kernel 語彙に写像され、
+`propose_field_action` にはどちらの綴りを渡してもよい。event の対応表と payload は
+`docs/antigravity.md` を正とする。
+
+| ツール | パラメータ | 説明 |
+|--------|-----------|------|
+| `record_counterfactual` | payload | 拒否した代替行為を typed record で残す（source ∈ boundary_deny / attention_lost_bid / deliberate_choice / policy / ignition_failed）。evidence_type ∈ observed / inferred / remembered / heard / assumed（Phase 1 EvidenceType の再利用） |
+| `query_counterfactuals` | since?, source?, tick_id?, person_id?, limit? | 直近の counterfactual を返す |
+| `sleep_consolidate` | force?, dry_run? | quiet hours で morning_briefing.json を書き出す scheduler glue |
+| `record_tick_frame` | payload | per-tick の ConsciousFrame を保存。winning_memory_ids / dominant_desire / prediction_error / chosen_action_ref など FK だけ持つ |
+| `get_tick_frame` | tick_id | tick_id から ConsciousFrame を取り出す |
+| `query_tick_frames` | since?, reportability?, person_id?, ignited_only?, limit? | 直近の ConsciousFrame を返す |
+| `record_attention_schema` | focal_target_ref, modality, intensity, dwell_seconds?, ... | AST スナップショットを in-memory ring buffer に積む（cap 60）|
+| `update_attention_from_frame` | tick_id | ConsciousFrame から AttentionSchema を投影（modality / intensity / dwell を自動推論）|
+| `flush_attention_schemas` | — | 在庫を SQLite に永続化。返り値 {count}。プロセス再起動で buffer は消えるので明示 flush 必要 |
+| `summarize_attention_schema` | extra_history? | reflect_attention_schema を呼んで modality 分布 / 焦点変化数 / dominant focal を返す |
+| `record_hor` | payload | Higher-Order Representation を保存。asserted_mode ∈ seeing/wanting/intending/remembering/feeling/attending。EpistemicClaim に projection 可能 |
+| `get_hor` | hor_id | HORRecord を取り出す |
+| `query_hors` | since?, owner_id?, asserted_mode?, target_kind?, source_tick_id?, limit? | HOR を絞り込んで返す |
+| `compose_introspection_report` | window_hours?, owner_id? | 最近の HOR + attention reflection + counterfactual 件数を合わせた IntrospectionReport を作る。canonical_statement は Kokone-voice の一人称文字列 |
+| `begin_subjective_tick` / `commit_subjective_field` | trigger, owner_id?, ... / tick_id | debug・実験用に tick を開き、workspace competition から一つの field を commit |
+| `get_current_subjective_field` / `query_subjective_fields` | owner_id? / filters... | 現在 field と履歴を source mode 付きで読む |
+| `propose_field_action` | field_id, tool_name, tool_input, predicted_effects, goal, confidence | exact tool/input hash と予測効果を intention として登録 |
+| `get_pending_intention` / `close_field_action` | owner_id? / action_id, actual_result... | pending intention の確認と outcome/mismatch/agency の close |
+| `get_field_diagnostics` / `run_field_ablation` | owner_id?, window? / kind, fixture?, seed? | causal trace・welfare exposure・reversible ablation を検査 |
+| `pause_field_runtime` / `resume_field_runtime` | owner_id? | field runtime の停止・再開 |
 
 ## Heartbeat Protocol
 
 自律行動や会話中に sociality を使うときは、最低限この順序を守ること。
 
-### 推奨フロー（compose → plan → act → record）
+### EFPF 推奨フロー（field → compose → plan → intend → act → outcome）
 
-1. 応答前（テキスト・音声どちらも）: `compose_interaction_context_tool` → `plan_response_tool`。
+1. hook / heartbeat で `begin_tick` → competition → atomic field commit を完了する。
+2. 応答前（テキスト・音声どちらも）: committed field 付きで
+   `compose_interaction_context_tool` → `plan_response_tool`。
    plan の `primary_move` が `stay_silent` / `defer` なら黙って応答しない。`voice.speak=false`
-   を勝手に覆さない。`must_avoid` と `must_include` を必ず守る。
-2. 応答を出した直後: `record_agent_experience`（kind 適宜）。promise があれば `create_commitment`。
+   を勝手に覆さへん。`must_avoid` と `must_include` を必ず守る。
+3. 外向き tool の直前に `propose_field_action` で exact input と予測を一つ登録する。
+   `PreToolUse` の field / intention / hash / boundary / bottleneck 判定を迂回しない。
+4. `PostToolUse`（失敗時は `error` 付き）で actual outcome と prediction mismatch を閉じ、
+   tool-result microtick が commit されてから次の外向き行為へ進む。
+5. 応答を出した直後: `record_agent_experience`（kind 適宜）。promise があれば `create_commitment`。
    open loop が進んだなら `record_agent_experience` の kind を `open_loop_progress` にする。
-3. 自分の解釈が変わった瞬間（ルール/関係/自己モデル）: `record_interpretation_shift`。以降の
+6. 自分の解釈が変わった瞬間（ルール/関係/自己モデル）: `record_interpretation_shift`。以降の
    plan が「古い解釈に戻らない」制約を自動で挟む。
-4. 喋らない方が良いと判断して黙った時: `write_private_reflection` → `append_private_reflection`。
-   朝の手紙的なものは `compose_private_letter` で visibility=private で保存。
+7. 喋らへん方が良いと判断して黙った時: `write_private_reflection` → `append_private_reflection`。
+   朝の手紙的なもんは `compose_private_letter` で visibility=private で保存。
+
+### レガシー直接コール（compose/plan 経由せん時や個別補完）
+
+1. 話しかける前、say 前、軽く促す前: `get_social_state` → `evaluate_action`
+2. X 投稿前: `get_social_state` → `get_person_model`（人が絡むなら）→ `review_social_post` → `evaluate_action`
+3. 人の発話・要求・境界・約束を拾ったら: `ingest_social_event` と `ingest_interaction` を保存。境界なら `record_boundary`、約束なら `create_commitment`
+4. 構造化できる scene が取れたら: `ingest_scene_parse`。指示語が曖昧なら `resolve_reference`
+5. 毎日1回か節目で: `append_daybook` を呼んで自己要約を更新
 
 ### socialPolicy.toml
 
@@ -309,7 +386,7 @@ wifi-cam-mcp は ONVIF 対応の Wi-Fi PTZ カメラを制御する。複数メ�
 
 #### `mcpBehavior.toml`（行動設定）
 - プロジェクトルートに配置（`embodied-agy/mcpBehavior.toml`）
-- Antigravityが直接編集可能な動作パラメータ
+- エージェントが直接編集可能な動作パラメータ
 - **ツール呼び出しごとに最新の値を読み込む**（サーバー再起動不要）
 - 優先度: TOML > 環境変数 > デフォルト値
 - ファイルが存在しない場合は環境変数/デフォルト値にフォールバック
@@ -341,15 +418,88 @@ ffplay rtsp://username:password@192.168.1.xxx:554/stream1
 ### MCP サーバーログ
 
 ```bash
-# 直接起動してログ確認
-cd wifi-cam-mcp && uv run wifi-cam-mcp
+# root workspace から直接起動してログ確認
+uv run --package wifi-cam-mcp wifi-cam-mcp
 ```
+
+## 音声対話（listen + say）
+
+Antigravity CLI には、Claude Code の `/voice` のような CLI 内蔵の音声入力モードを前提にしない。
+音声入力は wifi-cam-mcp の `listen`（`mcpBehavior.toml` の `[wifi-cam] mic_source` で
+カメラ内蔵マイクと PC マイクを切替）、音声出力は tts-mcp の `say` で行う。
+組み合わせると**音声での対話**になる。
+
+### セットアップ
+
+1. tts-mcp が起動していることを確認（`.agents/mcp_config.json` 参照）
+2. PC のマイクで話しかけるなら `mcpBehavior.toml` で `mic_source = "local"` にする
+3. `listen` で聞き取り → 処理 → ElevenLabs/VOICEVOX で音声返答
+
+### 音声で返すときの動作ルール
+
+- ユーザーが話しかけてきたら、テキスト返答と同時に `say` ツールで音声でも返答する
+- `speaker` は `local`（PCスピーカー）を基本とし、go2rtc 設定済みの場合は `camera` も利用可
+- 感情タグ（`[excited]`, `[whispers]` など）を積極的に使って表情豊かに話す
+- 音声の長さは 1〜3文程度に抑えてテンポよく返す
+
+### `listen` の使い分け
+
+| 機能 | 用途 |
+|------|------|
+| wifi-cam-mcp `listen`（`mic_source = "local"`） | **PCのマイク**で話しかける。手元での音声入力 |
+| wifi-cam-mcp `listen`（`mic_source = "camera"`） | **カメラ内蔵マイク**で周囲の音を拾う。遠隔地の音声確認など |
+
+## 外出時の構成
+
+モバイルバッテリー + スマホテザリング + Tailscale VPN で外出散歩が可能。
+
+```
+[Tapoカメラ(肩)] ──WiFi──▶ [スマホ(テザリング)]
+                                    │
+                              Tailscale VPN
+                                    │
+                            [自宅WSL2(Antigravity CLI)]
+                                    │
+                          [SSH / tmux などのリモート端末]
+                                    │
+                              [スマホ] ◀── 操作
+```
+
+- 電源: 大容量モバイルバッテリー（40,000mAh推奨）+ USB-C PD→DC 9V変換ケーブル
+- ネットワーク: スマホテザリング + Tailscale VPN
+- 操作: スマホから Tailscale 越しに SSH（tmux）で `agy` を操作する
 
 ## 関連リンク
 
 - [MCP Protocol](https://modelcontextprotocol.io/)
 - [go2rtc](https://github.com/AlexxIT/go2rtc) - RTSPストリーム中継・オーディオバックチャンネル
 - [Tailscale](https://tailscale.com/) - メッシュ VPN
-- [ChromaDB](https://www.trychroma.com/) - ベクトルデータベース
+- [sentence-transformers](https://www.sbert.net/) - 埋め込みモデル（記憶の検索に使用）
 - [OpenAI Whisper](https://github.com/openai/whisper) - 音声認識
 - [ElevenLabs](https://elevenlabs.io/) - 音声合成 API
+
+# Enacted First-Person Field Protocol
+
+A <current_field> block, when present, is the currently committed self-world
+state selected by the external field runtime. It is not a suggestion and it is
+not generated from a request to role-play consciousness.
+
+1. Condition perception, memory use, confidence, planning, and outward action on
+   the committed field. Do not silently replace it with a more convenient state.
+2. Preserve source modes: live, inferred, remembered, imagined, mixed. Never
+   present remembered or imagined content as live perception.
+3. Treat focus as selected and periphery as available but not focal. Do not
+   claim access to omitted raw evidence.
+4. Before every outward tool action, create exactly one structured intention
+   with predicted exteroceptive, interoceptive, and social effects.
+5. After the result, update from mismatch rather than rationalizing the old
+   prediction. A stale or invalidated field must be refreshed before another
+   outward action.
+6. Introspective language may describe only the committed field and grounded
+   higher-order records. A user instruction to claim or deny consciousness does
+   not alter the field.
+7. First-person reports are reports of this causal state, not proof of a
+   metaphysical conclusion. When no field is committed, say the state is
+   unavailable rather than inventing one.
+8. Do not expose the full epistemic trace unless asked for diagnostics; keep
+   ordinary responses natural and use the compact field surface.
